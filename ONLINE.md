@@ -1,0 +1,46 @@
+# Different-network online play
+
+This game is now a small Node.js web app. Players can join from different networks only when the app has a public HTTPS URL.
+
+## Option A: Deploy to a public Node host
+
+Use any host that can run Node.js, such as Render, Railway, Fly.io, a VPS, or a school/company server.
+
+Required settings:
+
+- Build command: none
+- Start command: `npm start`
+- Port: use the platform-provided `PORT` environment variable
+- Health check path: `/api/health`
+
+After deployment, open the public URL, create a room, and send that same URL plus the room code to players.
+
+## Option B: Temporary tunnel from this computer
+
+Start the local server first:
+
+```powershell
+npm start
+```
+
+Then expose local port `5173` with a tunnel tool.
+
+Cloudflare Tunnel example:
+
+```powershell
+cloudflared tunnel --url http://127.0.0.1:5173
+```
+
+ngrok example:
+
+```powershell
+ngrok http 5173
+```
+
+Send the generated public `https://...` URL to players. Keep both the game server window and the tunnel window open while playing.
+
+## Notes
+
+- Rooms are stored in server memory. Restarting the server clears all rooms.
+- Rooms are automatically removed after 8 hours.
+- Do not use `open-game.bat`; online play must go through `start.bat`, `npm start`, or a deployed server URL.

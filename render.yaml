@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: online-werewolf
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true

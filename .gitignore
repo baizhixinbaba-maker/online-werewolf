@@ -1,0 +1,9 @@
+.playwright-cli/
+cloudflared.exe
+public-url*.txt
+server-*.log
+ssh-tunnel-*.txt
+serveo-*.txt
+pinggy-*.txt
+*.log
+node_modules/
