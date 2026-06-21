@@ -897,7 +897,7 @@ function ensureVoicePeer(peerId) {
   if (existing) return existing;
   const connection = new RTCPeerConnection({ iceServers: state.voiceIceServers });
   state.localStream.getAudioTracks().forEach((track) => connection.addTrack(track, state.localStream));
-  const peer = { connection, audio: null, offerSent: false };
+  const peer = { connection, audio: null, offerSent: false, pendingCandidates: [] };
   connection.onicecandidate = (event) => {
     if (event.candidate) sendVoiceSignal(peerId, "ice-candidate", event.candidate).catch(() => {});
   };
@@ -950,6 +950,7 @@ async function handleVoiceSignal(message) {
   const peer = ensureVoicePeer(message.from);
   if (message.type === "offer") {
     await peer.connection.setRemoteDescription(new RTCSessionDescription(message.payload));
+    await flushPendingCandidates(peer);
     const answer = await peer.connection.createAnswer();
     await peer.connection.setLocalDescription(answer);
     await sendVoiceSignal(message.from, "answer", peer.connection.localDescription);
@@ -958,11 +959,27 @@ async function handleVoiceSignal(message) {
   if (message.type === "answer") {
     if (peer.connection.signalingState !== "stable") {
       await peer.connection.setRemoteDescription(new RTCSessionDescription(message.payload));
+      await flushPendingCandidates(peer);
     }
     return;
   }
   if (message.type === "ice-candidate") {
-    await peer.connection.addIceCandidate(new RTCIceCandidate(message.payload));
+    await addRemoteCandidate(peer, message.payload);
+  }
+}
+
+async function addRemoteCandidate(peer, payload) {
+  if (!peer.connection.remoteDescription) {
+    peer.pendingCandidates.push(payload);
+    return;
+  }
+  await peer.connection.addIceCandidate(new RTCIceCandidate(payload));
+}
+
+async function flushPendingCandidates(peer) {
+  const pending = peer.pendingCandidates.splice(0);
+  for (const candidate of pending) {
+    await peer.connection.addIceCandidate(new RTCIceCandidate(candidate));
   }
 }
 
