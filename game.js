@@ -28,7 +28,12 @@ let state = {
   configs: fallbackConfigs,
   roleMeta: fallbackRoleMeta,
   counts: Object.keys(fallbackConfigs).map(Number),
+  minPlayerCount: 3,
+  maxPlayerCount: 20,
   playerCount: 6,
+  roleConfig: { ...fallbackConfigs[6] },
+  speechTimeLimit: storage.getItem("werewolfSpeechTimeLimit") || "60",
+  lastWordsTimeLimit: storage.getItem("werewolfLastWordsTimeLimit") || "60",
   room: null,
   hostToken: storage.getItem("werewolfHostToken") || "",
   playerToken: storage.getItem("werewolfPlayerToken") || "",
@@ -41,6 +46,19 @@ let state = {
   error: "",
   roleVisible: false,
   pollTimer: null,
+  clockTimer: null,
+  now: Date.now(),
+  voiceEnabled: false,
+  voiceMuted: false,
+  voiceStatus: "",
+  voiceError: "",
+  voiceParticipants: [],
+  voiceSyncTimer: null,
+  voiceLastSignalId: 0,
+  voiceIceServers: [],
+  voicePlayerId: "",
+  localStream: null,
+  peers: new Map(),
   isTyping: false,
   pendingRoom: null,
 };
@@ -128,6 +146,88 @@ function getRoleCountText(config) {
     .join("、");
 }
 
+function totalRoles(config = state.roleConfig) {
+  return roleOrder.reduce((sum, role) => sum + (Number(config[role]) || 0), 0);
+}
+
+function goodRoleCount(config = state.roleConfig) {
+  return totalRoles(config) - (Number(config.werewolf) || 0);
+}
+
+function recommendedConfig(count = state.playerCount) {
+  if (state.configs[count]) return { ...state.configs[count] };
+  const playerCount = Math.min(state.maxPlayerCount, Math.max(state.minPlayerCount, Number(count) || state.minPlayerCount));
+  const werewolf = Math.max(1, Math.min(Math.floor(playerCount / 3), playerCount - 2));
+  const seer = playerCount >= 4 ? 1 : 0;
+  const witch = playerCount >= 5 ? 1 : 0;
+  const hunter = playerCount >= 8 ? 1 : 0;
+  const guard = playerCount >= 12 ? 1 : 0;
+  const used = werewolf + seer + witch + hunter + guard;
+  return {
+    werewolf,
+    villager: Math.max(1, playerCount - used),
+    seer,
+    witch,
+    hunter,
+    guard,
+  };
+}
+
+function normalizeRoleConfig(config = state.roleConfig, playerCount = state.playerCount) {
+  const normalized = {};
+  for (const role of roleOrder) {
+    const count = Number(config[role] || 0);
+    normalized[role] = Number.isInteger(count) && count > 0 ? Math.min(count, playerCount) : 0;
+  }
+  return normalized;
+}
+
+function roleConfigError(config = state.roleConfig, playerCount = state.playerCount) {
+  const total = totalRoles(config);
+  if (total !== playerCount) return `当前身份共 ${total} 个，需要正好等于 ${playerCount} 个玩家。`;
+  if ((Number(config.werewolf) || 0) < 1) return "至少需要 1 名狼人。";
+  if (goodRoleCount(config) < 1) return "至少需要 1 名好人。";
+  return "";
+}
+
+function timeLimitLabel(value) {
+  return String(value) === "none" || value === null || Number(value) === 0 ? "不限时" : `${value}秒`;
+}
+
+function timeLimitPayload(value) {
+  return String(value) === "none" ? "none" : Number(value) || 60;
+}
+
+function renderTimeOptions(selectedValue) {
+  return [
+    ["30", "30秒"],
+    ["60", "60秒"],
+    ["90", "90秒"],
+    ["120", "120秒"],
+    ["none", "不限时"],
+  ]
+    .map(([value, label]) => `<option value="${value}" ${String(selectedValue) === value ? "selected" : ""}>${label}</option>`)
+    .join("");
+}
+
+function formatCountdown(milliseconds) {
+  if (milliseconds === null || milliseconds === undefined) return "不限时";
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+function speechActionLabel(action) {
+  const labels = {
+    done: "已发言",
+    skip: "已跳过",
+    timeout: "超时结束",
+    "host-ended-stage": "房主结束阶段",
+  };
+  return labels[action] || action;
+}
+
 function roleTag(role) {
   if (!role) return `<span class="role-tag villager">未知</span>`;
   return `<span class="role-tag ${role}">${state.roleMeta[role]?.name || role}</span>`;
@@ -137,8 +237,8 @@ function panel(content, extra = "") {
   return `<section class="panel ${extra}"><div class="panel-inner">${content}</div></section>`;
 }
 
-function renderConfigList(count = state.playerCount) {
-  const config = state.configs[count];
+function renderConfigList(configOrCount = state.roleConfig) {
+  const config = typeof configOrCount === "number" ? state.configs[configOrCount] || recommendedConfig(configOrCount) : configOrCount;
   return `
     <ul class="config-list">
       ${roleOrder
@@ -153,6 +253,36 @@ function renderConfigList(count = state.playerCount) {
         )
         .join("")}
     </ul>
+  `;
+}
+
+function renderRoleConfigEditor() {
+  const recommended = recommendedConfig(state.playerCount);
+  const error = roleConfigError();
+  return `
+    <div class="role-config-editor">
+      <div class="section-title">
+        <h3>自定义身份数量</h3>
+        <strong>${totalRoles()} / ${state.playerCount}</strong>
+      </div>
+      <div class="notice">系统推荐：${getRoleCountText(recommended)}</div>
+      <div class="actions">
+        <button class="ghost-button" type="button" data-apply-recommended>套用推荐配置</button>
+      </div>
+      <div class="role-config-grid">
+        ${roleOrder
+          .map(
+            (role) => `
+              <label>
+                ${state.roleMeta[role].name}
+                <input type="number" min="0" max="${state.playerCount}" value="${Number(state.roleConfig[role] || 0)}" data-role-count="${role}" />
+              </label>
+            `,
+          )
+          .join("")}
+      </div>
+      ${error ? `<div class="notice danger">${escapeHtml(error)}</div>` : `<div class="notice ok">当前配置可用：${getRoleCountText(state.roleConfig)}</div>`}
+    </div>
   `;
 }
 
@@ -235,21 +365,29 @@ function renderHome() {
             <h3>创建房间人数</h3>
             <strong>${state.playerCount} 人</strong>
           </div>
-          <div class="number-grid" role="group" aria-label="选择玩家人数">
-            ${state.counts
-              .map(
-                (count) => `
-                  <button class="number-button ${count === state.playerCount ? "active" : ""}" type="button" data-count="${count}">
-                    ${count}
-                  </button>
-                `,
-              )
-              .join("")}
-          </div>
+          <label>
+            玩家人数
+            <input type="number" min="${state.minPlayerCount}" max="${state.maxPlayerCount}" value="${state.playerCount}" data-player-count />
+          </label>
+          <p class="subtle">支持 ${state.minPlayerCount}-${state.maxPlayerCount} 人。人数变化时会自动生成一套标准身份数量供参考。</p>
         </div>
-        <div class="notice">当前配置：${getRoleCountText(state.configs[state.playerCount])}</div>
+        ${renderRoleConfigEditor()}
+        <div class="settings-grid">
+          <label>
+            发言时间
+            <select data-speech-time>
+              ${renderTimeOptions(state.speechTimeLimit)}
+            </select>
+          </label>
+          <label>
+            遗言时间
+            <select data-last-words-time>
+              ${renderTimeOptions(state.lastWordsTimeLimit)}
+            </select>
+          </label>
+        </div>
         <div class="actions">
-          <button class="primary-button" type="button" data-create-room>创建联机房间</button>
+          <button class="primary-button" type="button" data-create-room ${roleConfigError() ? "disabled" : ""}>创建联机房间</button>
         </div>
       `)}
       ${panel(`
@@ -273,9 +411,9 @@ function renderHome() {
           <button class="secondary-button" type="button" data-join-room>加入房间</button>
         </div>
         <div class="section-title">
-          <h3>${state.playerCount} 人身份配置</h3>
+          <h3>${state.playerCount} 人推荐配置</h3>
         </div>
-        ${renderConfigList(state.playerCount)}
+        ${renderConfigList(recommendedConfig(state.playerCount))}
       `)}
     </div>
   `;
@@ -325,6 +463,38 @@ function renderRoomBadge(room) {
     <div class="room-badge ${room.isHost ? "host" : "player"}">
       <strong>${room.isHost ? "房主控制台" : "玩家视角"}</strong>
       <span>${room.isHost ? "只有本设备可以开始、结算或解散房间" : "等待房主开始或结算游戏"}</span>
+    </div>
+  `;
+}
+
+function renderVoicePanel(room) {
+  if (!state.playerToken || !room.viewer) return "";
+  const participants = state.voiceEnabled ? state.voiceParticipants : room.voiceParticipants || [];
+  const status = state.voiceError || state.voiceStatus || (state.voiceEnabled ? "语音已开启" : "语音未开启");
+  return `
+    <div class="voice-box ${state.voiceEnabled ? "active" : ""}">
+      <div class="section-title">
+        <h3>房间语音</h3>
+        <span class="status-tag ${state.voiceEnabled ? "alive" : "dead"}">${participants.length} 人在线</span>
+      </div>
+      <div class="voice-list">
+        ${
+          participants.length
+            ? participants.map((item) => `<span class="voice-chip ${item.id === state.voicePlayerId ? "self" : ""}">${item.seat}号 ${escapeHtml(item.name)}</span>`).join("")
+            : `<span class="subtle">暂无玩家开启语音</span>`
+        }
+      </div>
+      <div class="actions">
+        ${
+          state.voiceEnabled
+            ? `
+              <button class="secondary-button" type="button" data-voice-mute>${state.voiceMuted ? "取消静音" : "静音"}</button>
+              <button class="ghost-button" type="button" data-voice-leave>关闭语音</button>
+            `
+            : `<button class="secondary-button" type="button" data-voice-join>开启语音</button>`
+        }
+      </div>
+      <p class="subtle voice-status">${escapeHtml(status)}</p>
     </div>
   `;
 }
@@ -383,6 +553,7 @@ function renderRoom() {
             `
             : renderGameControls(room)
         }
+        ${renderVoicePanel(room)}
       `)}
       ${panel(`
         <div class="section-title">
@@ -392,7 +563,7 @@ function renderRoom() {
         <div class="section-title">
           <h3>本局配置</h3>
         </div>
-        ${renderConfigList(room.playerCount)}
+        ${renderConfigList(room.config)}
       `)}
     </div>
   `;
@@ -417,9 +588,21 @@ function renderGameControls(room) {
 }
 
 function renderPublicRecords(room) {
-  return room.publicLog?.length
+  const speechLog = room.speechLog?.length
+    ? `
+      <div class="section-title"><h3>发言记录</h3></div>
+      <ul class="records">
+        ${room.speechLog
+          .slice(-12)
+          .map((record) => `<li class="record-item"><span>第${record.day}天 ${record.seat}号 ${escapeHtml(record.name)}：${speechActionLabel(record.action)}</span></li>`)
+          .join("")}
+      </ul>
+    `
+    : "";
+  const publicLog = room.publicLog?.length
     ? `<ul class="records">${room.publicLog.map((item) => `<li class="record-item"><span>${escapeHtml(item)}</span></li>`).join("")}</ul>`
     : "";
+  return `${publicLog}${speechLog}`;
 }
 
 function renderPlayerPanel(room) {
@@ -450,8 +633,10 @@ function renderPlayerPanel(room) {
 }
 
 function renderPhaseAction(room, viewer) {
+  if (room.phase === "lastWords") return renderSpeechStage(room, viewer, room.lastWords);
   if (!viewer.alive && room.phase !== "hunter") return `<div class="notice danger">你已出局，请等待游戏结束。</div>`;
   if (room.phase === "night") return renderNightAction(room, viewer);
+  if (room.phase === "discussion") return renderSpeechStage(room, viewer, room.discussion);
   if (room.phase === "day") return renderVoteAction(room, viewer);
   if (room.phase === "hunter") return renderHunterAction(room, viewer);
   return "";
@@ -495,6 +680,71 @@ function renderNightAction(room, viewer) {
   return `<div class="notice">夜晚阶段，你没有夜晚技能，等待天亮。</div>`;
 }
 
+function renderSpeechStage(room, viewer, stage) {
+  if (!stage) return `<div class="notice">发言阶段准备中。</div>`;
+  const currentPlayer = stage.currentPlayer;
+  const isCurrentViewer = Boolean(currentPlayer && viewer?.id === currentPlayer.id);
+  const canEndCurrent = Boolean(room.isHost || isCurrentViewer);
+  const canHostControl = Boolean(room.isHost);
+  const countdown = stage.timeLimit ? formatCountdown((stage.endsAt || 0) - Date.now()) : "不限时";
+  const phaseTitle = stage.kind === "lastWords" ? "遗言阶段" : "白天发言";
+  const currentStatus = currentPlayer?.alive ? "存活" : "已出局";
+  return panel(`
+    <div class="speech-stage">
+      <div class="section-title">
+        <h3>第${stage.day}天 · ${phaseTitle}</h3>
+        <span class="status-tag alive">${timeLimitLabel(stage.timeLimit)}</span>
+      </div>
+      <div class="speaker-card">
+        <span class="camp-tag ${stage.kind === "lastWords" ? "werewolf" : "good"}">当前发言</span>
+        <h3>${currentPlayer ? `${currentPlayer.seat}号 ${escapeHtml(currentPlayer.name)}` : "等待中"}</h3>
+        <p class="subtle">状态：${currentPlayer ? currentStatus : "无"} · 倒计时：<strong data-countdown>${countdown}</strong></p>
+      </div>
+      <div class="actions">
+        ${
+          canEndCurrent
+            ? `<button class="primary-button" type="button" data-speech-end>结束发言</button>`
+            : `<button class="secondary-button" type="button" disabled>等待当前玩家发言</button>`
+        }
+        ${canHostControl ? `<button class="ghost-button" type="button" data-speech-skip>跳过发言</button>` : ""}
+        ${canHostControl ? `<button class="danger-button" type="button" data-speech-end-stage>${stage.kind === "lastWords" ? "结束遗言阶段" : "直接进入投票"}</button>` : ""}
+      </div>
+      <div class="section-title"><h3>发言顺序</h3></div>
+      <ul class="speech-list">
+        ${stage.entries
+          .map(
+            (entry) => `
+              <li class="speech-item ${entry.isCurrent ? "current" : ""}">
+                <span>${entry.seat}号 ${escapeHtml(entry.name)}</span>
+                <strong>${entry.alive || stage.kind === "lastWords" ? speechStatusLabel(entry.status) : "已出局"}</strong>
+              </li>
+            `,
+          )
+          .join("")}
+      </ul>
+      ${
+        stage.records?.length
+          ? `
+            <div class="section-title"><h3>发言记录</h3></div>
+            <ul class="records">
+              ${stage.records
+                .map((record) => `<li class="record-item"><span>${record.seat}号 ${escapeHtml(record.name)}：${speechActionLabel(record.action)}</span></li>`)
+                .join("")}
+            </ul>
+          `
+          : ""
+      }
+    </div>
+  `);
+}
+
+function speechStatusLabel(status) {
+  if (status === "speaking") return "发言中";
+  if (status === "done") return "已发言";
+  if (status === "skipped") return "已跳过";
+  return "等待中";
+}
+
 function renderVoteAction(room, viewer) {
   if (viewer.dayVoteDone) return `<div class="notice ok">已投票，等待其他玩家。${room.dayVotesSubmitted} / ${room.dayVotesNeeded}</div>`;
   return panel(`
@@ -503,6 +753,211 @@ function renderVoteAction(room, viewer) {
     <label>放逐目标<select data-action-target>${renderPlayerOptions(room.players)}</select></label>
     <div class="actions"><button class="danger-button" type="button" data-day-vote>确认投票</button></div>
   `);
+}
+
+async function voiceApi(path, options = {}) {
+  return api(`/api/rooms/${encodeURIComponent(state.roomCode)}/voice/${path}`, options);
+}
+
+async function joinVoice() {
+  if (!state.playerToken) {
+    setMessage("请先加入房间再开启语音。", true);
+    render();
+    return;
+  }
+  try {
+    state.voiceError = "";
+    state.voiceStatus = "正在请求麦克风权限...";
+    render();
+    state.localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false,
+    });
+    const data = await voiceApi("join", {
+      method: "POST",
+      body: JSON.stringify({ playerToken: state.playerToken }),
+    });
+    state.voiceEnabled = true;
+    state.voiceMuted = false;
+    state.voicePlayerId = data.playerId;
+    state.voiceParticipants = data.participants || [];
+    state.voiceIceServers = data.iceServers || [];
+    state.voiceLastSignalId = data.lastSignalId || 0;
+    state.voiceStatus = "语音已开启";
+    startVoiceSync();
+    await connectVoiceParticipants();
+    render();
+  } catch (error) {
+    state.voiceError = error.message || "开启语音失败";
+    stopLocalVoice();
+    render();
+  }
+}
+
+function stopLocalVoice() {
+  if (state.localStream) {
+    state.localStream.getTracks().forEach((track) => track.stop());
+    state.localStream = null;
+  }
+}
+
+function startVoiceSync() {
+  stopVoiceSync();
+  state.voiceSyncTimer = window.setInterval(syncVoice, 1200);
+}
+
+function stopVoiceSync() {
+  if (state.voiceSyncTimer) {
+    window.clearInterval(state.voiceSyncTimer);
+    state.voiceSyncTimer = null;
+  }
+}
+
+async function syncVoice() {
+  if (!state.voiceEnabled) return;
+  try {
+    const data = await voiceApi(`sync?token=${encodeURIComponent(state.playerToken)}&since=${state.voiceLastSignalId}`);
+    state.voiceParticipants = data.participants || [];
+    state.voiceLastSignalId = data.lastSignalId || state.voiceLastSignalId;
+    for (const message of data.messages || []) {
+      await handleVoiceSignal(message);
+    }
+    await connectVoiceParticipants();
+    cleanupVoicePeers();
+    updateVoicePanelOnly();
+  } catch (error) {
+    state.voiceError = error.message || "语音连接中断";
+    updateVoicePanelOnly();
+  }
+}
+
+async function leaveVoice() {
+  try {
+    if (state.voiceEnabled) {
+      await voiceApi("leave", {
+        method: "POST",
+        body: JSON.stringify({ playerToken: state.playerToken }),
+      });
+    }
+  } catch (error) {
+    // The local microphone and peer connections should still close even if the leave request fails.
+  }
+  stopVoice();
+  render();
+}
+
+function stopVoice() {
+  stopVoiceSync();
+  for (const peer of state.peers.values()) {
+    peer.connection.close();
+    peer.audio?.remove();
+  }
+  state.peers.clear();
+  stopLocalVoice();
+  state.voiceEnabled = false;
+  state.voiceMuted = false;
+  state.voiceStatus = "";
+  state.voiceError = "";
+  state.voiceParticipants = [];
+  state.voiceLastSignalId = 0;
+  state.voiceIceServers = [];
+  state.voicePlayerId = "";
+}
+
+function toggleVoiceMute() {
+  if (!state.localStream) return;
+  state.voiceMuted = !state.voiceMuted;
+  state.localStream.getAudioTracks().forEach((track) => {
+    track.enabled = !state.voiceMuted;
+  });
+  state.voiceStatus = state.voiceMuted ? "麦克风已静音" : "麦克风已开启";
+  render();
+}
+
+async function connectVoiceParticipants() {
+  if (!state.voiceEnabled || !state.voicePlayerId || !state.localStream) return;
+  for (const participant of state.voiceParticipants) {
+    if (participant.id === state.voicePlayerId) continue;
+    const peer = ensureVoicePeer(participant.id);
+    if (state.voicePlayerId < participant.id && !peer.offerSent) {
+      peer.offerSent = true;
+      const offer = await peer.connection.createOffer();
+      await peer.connection.setLocalDescription(offer);
+      await sendVoiceSignal(participant.id, "offer", peer.connection.localDescription);
+    }
+  }
+}
+
+function ensureVoicePeer(peerId) {
+  const existing = state.peers.get(peerId);
+  if (existing) return existing;
+  const connection = new RTCPeerConnection({ iceServers: state.voiceIceServers });
+  state.localStream.getAudioTracks().forEach((track) => connection.addTrack(track, state.localStream));
+  const peer = { connection, audio: null, offerSent: false };
+  connection.onicecandidate = (event) => {
+    if (event.candidate) sendVoiceSignal(peerId, "ice-candidate", event.candidate).catch(() => {});
+  };
+  connection.ontrack = (event) => {
+    if (!peer.audio) {
+      peer.audio = document.createElement("audio");
+      peer.audio.autoplay = true;
+      peer.audio.playsInline = true;
+      document.body.appendChild(peer.audio);
+    }
+    peer.audio.srcObject = event.streams[0];
+  };
+  connection.onconnectionstatechange = () => {
+    if (["failed", "closed", "disconnected"].includes(connection.connectionState)) {
+      state.voiceStatus = "语音正在重连...";
+      updateVoicePanelOnly();
+    }
+  };
+  state.peers.set(peerId, peer);
+  return peer;
+}
+
+async function sendVoiceSignal(to, type, payload) {
+  await voiceApi("signal", {
+    method: "POST",
+    body: JSON.stringify({ playerToken: state.playerToken, to, type, payload }),
+  });
+}
+
+async function handleVoiceSignal(message) {
+  if (!state.voiceEnabled || !message.from) return;
+  const peer = ensureVoicePeer(message.from);
+  if (message.type === "offer") {
+    await peer.connection.setRemoteDescription(new RTCSessionDescription(message.payload));
+    const answer = await peer.connection.createAnswer();
+    await peer.connection.setLocalDescription(answer);
+    await sendVoiceSignal(message.from, "answer", peer.connection.localDescription);
+    return;
+  }
+  if (message.type === "answer") {
+    if (peer.connection.signalingState !== "stable") {
+      await peer.connection.setRemoteDescription(new RTCSessionDescription(message.payload));
+    }
+    return;
+  }
+  if (message.type === "ice-candidate") {
+    await peer.connection.addIceCandidate(new RTCIceCandidate(message.payload));
+  }
+}
+
+function cleanupVoicePeers() {
+  const onlineIds = new Set(state.voiceParticipants.map((participant) => participant.id));
+  for (const [peerId, peer] of state.peers.entries()) {
+    if (onlineIds.has(peerId)) continue;
+    peer.connection.close();
+    peer.audio?.remove();
+    state.peers.delete(peerId);
+  }
+}
+
+function updateVoicePanelOnly() {
+  const box = app.querySelector(".voice-box");
+  if (!box || !state.room) return;
+  box.outerHTML = renderVoicePanel(state.room);
 }
 
 function renderHunterAction(room, viewer) {
@@ -529,6 +984,49 @@ function getRoleHelp(role) {
 function render() {
   if (state.room) renderRoom();
   else renderHome();
+  updateCountdownDisplay();
+  manageClockTimer();
+}
+
+function currentSpeechStage() {
+  if (!state.room) return null;
+  if (state.room.phase === "lastWords") return state.room.lastWords;
+  if (state.room.phase === "discussion") return state.room.discussion;
+  return null;
+}
+
+function updateCountdownDisplay() {
+  const stage = currentSpeechStage();
+  const countdownElement = app.querySelector("[data-countdown]");
+  if (!stage || !countdownElement) return;
+  countdownElement.textContent = stage.timeLimit ? formatCountdown((stage.endsAt || 0) - Date.now()) : "不限时";
+  if (stage.timeLimit && (stage.endsAt || 0) <= Date.now()) {
+    countdownElement.textContent = "0:00";
+  }
+}
+
+function manageClockTimer() {
+  const stage = currentSpeechStage();
+  if (!stage?.timeLimit) {
+    stopClock();
+    return;
+  }
+  if (state.clockTimer) return;
+  state.clockTimer = window.setInterval(() => {
+    state.now = Date.now();
+    updateCountdownDisplay();
+    const activeStage = currentSpeechStage();
+    if (activeStage?.timeLimit && (activeStage.endsAt || 0) <= Date.now()) {
+      refreshRoom();
+    }
+  }, 1000);
+}
+
+function stopClock() {
+  if (state.clockTimer) {
+    window.clearInterval(state.clockTimer);
+    state.clockTimer = null;
+  }
 }
 
 async function loadConfigs() {
@@ -537,6 +1035,9 @@ async function loadConfigs() {
     state.configs = data.playerConfigs;
     state.roleMeta = data.roleMeta;
     state.counts = data.counts;
+    state.minPlayerCount = data.minPlayerCount || state.minPlayerCount;
+    state.maxPlayerCount = data.maxPlayerCount || state.maxPlayerCount;
+    if (roleConfigError()) state.roleConfig = recommendedConfig(state.playerCount);
   } catch (error) {
     setMessage("配置加载失败，已使用本地默认配置。", true);
   }
@@ -547,7 +1048,13 @@ async function createRoom() {
     setMessage("");
     const data = await api("/api/rooms", {
       method: "POST",
-      body: JSON.stringify({ playerCount: state.playerCount, hostName: state.playerName }),
+      body: JSON.stringify({
+        playerCount: state.playerCount,
+        hostName: state.playerName,
+        roleConfig: normalizeRoleConfig(state.roleConfig, state.playerCount),
+        speechTimeLimit: timeLimitPayload(state.speechTimeLimit),
+        lastWordsTimeLimit: timeLimitPayload(state.lastWordsTimeLimit),
+      }),
     });
     state.room = data.room;
     state.roomCode = data.room.code;
@@ -559,6 +1066,8 @@ async function createRoom() {
     storage.setItem("werewolfHostToken", state.hostToken);
     storage.setItem("werewolfPlayerToken", state.playerToken);
     storage.setItem("werewolfPlayerName", state.playerName);
+    storage.setItem("werewolfSpeechTimeLimit", state.speechTimeLimit);
+    storage.setItem("werewolfLastWordsTimeLimit", state.lastWordsTimeLimit);
     setMessage("房间已创建，请分享页面里的完整加入地址给朋友。");
     startPolling();
     render();
@@ -711,6 +1220,24 @@ function submitHunter() {
   submitPlayerAction("hunter", { targetId: selectedValue("[data-hunter-target]") });
 }
 
+async function submitSpeechAction(action) {
+  try {
+    const body =
+      action === "end" && !state.hostToken
+        ? { playerToken: state.playerToken }
+        : { hostToken: state.hostToken || "", playerToken: state.playerToken || "" };
+    const data = await api(`/api/rooms/${encodeURIComponent(state.roomCode)}/speech/${action}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    state.room = data.room;
+    render();
+  } catch (error) {
+    setMessage(error.message, true);
+    render();
+  }
+}
+
 async function disbandRoom() {
   if (!state.hostToken) {
     setMessage("只有房主可以解散房间。", true);
@@ -747,6 +1274,8 @@ function stopPolling() {
 
 function clearRoomSession() {
   stopPolling();
+  stopClock();
+  if (state.voiceEnabled) stopVoice();
   storage.removeItem("werewolfRoomCode");
   storage.removeItem("werewolfHostToken");
   storage.removeItem("werewolfPlayerToken");
@@ -774,6 +1303,12 @@ function handleClick(event) {
   if (!button) return;
   if (button.dataset.count) {
     state.playerCount = Number(button.dataset.count);
+    state.roleConfig = recommendedConfig(state.playerCount);
+    render();
+    return;
+  }
+  if (button.dataset.applyRecommended !== undefined) {
+    state.roleConfig = recommendedConfig(state.playerCount);
     render();
     return;
   }
@@ -813,6 +1348,30 @@ function handleClick(event) {
     submitHunter();
     return;
   }
+  if (button.dataset.voiceJoin !== undefined) {
+    joinVoice();
+    return;
+  }
+  if (button.dataset.voiceMute !== undefined) {
+    toggleVoiceMute();
+    return;
+  }
+  if (button.dataset.voiceLeave !== undefined) {
+    leaveVoice();
+    return;
+  }
+  if (button.dataset.speechEnd !== undefined) {
+    submitSpeechAction("end");
+    return;
+  }
+  if (button.dataset.speechSkip !== undefined) {
+    submitSpeechAction("skip");
+    return;
+  }
+  if (button.dataset.speechEndStage !== undefined) {
+    submitSpeechAction("end-stage");
+    return;
+  }
   if (button.dataset.toggleRole !== undefined) {
     state.roleVisible = !state.roleVisible;
     render();
@@ -821,6 +1380,24 @@ function handleClick(event) {
 
 function handleInput(event) {
   state.isTyping = true;
+  if (event.target.dataset.playerCount !== undefined) {
+    const count = Math.min(state.maxPlayerCount, Math.max(state.minPlayerCount, Number(event.target.value) || state.minPlayerCount));
+    state.playerCount = count;
+    event.target.value = String(count);
+    state.roleConfig = recommendedConfig(count);
+    render();
+    return;
+  }
+  if (event.target.dataset.roleCount !== undefined) {
+    const role = event.target.dataset.roleCount;
+    state.roleConfig = {
+      ...state.roleConfig,
+      [role]: Math.min(state.playerCount, Math.max(0, Number(event.target.value) || 0)),
+    };
+    event.target.value = String(state.roleConfig[role]);
+    render();
+    return;
+  }
   if (event.target.dataset.joinCode !== undefined) {
     const rawValue = event.target.value;
     if (parseInviteText(rawValue)) {
@@ -846,6 +1423,14 @@ function handleInput(event) {
   }
   if (event.target.dataset.playerName !== undefined) {
     state.playerName = event.target.value;
+  }
+  if (event.target.dataset.speechTime !== undefined) {
+    state.speechTimeLimit = event.target.value;
+    storage.setItem("werewolfSpeechTimeLimit", state.speechTimeLimit);
+  }
+  if (event.target.dataset.lastWordsTime !== undefined) {
+    state.lastWordsTimeLimit = event.target.value;
+    storage.setItem("werewolfLastWordsTimeLimit", state.lastWordsTimeLimit);
   }
 }
 

@@ -209,6 +209,48 @@ textarea {
   border-left: 5px solid var(--god);
 }
 
+.voice-box {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(118, 107, 98, 0.18);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fffaf0;
+}
+
+.voice-box.active {
+  border-left: 5px solid var(--ok);
+}
+
+.voice-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.voice-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid rgba(118, 107, 98, 0.2);
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: #fffdf8;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.voice-chip.self {
+  border-color: rgba(40, 112, 95, 0.35);
+  background: #edf8f5;
+  color: var(--ok);
+}
+
+.voice-status {
+  font-size: 13px;
+}
+
 .number-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
@@ -299,6 +341,23 @@ textarea {
 .name-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.role-config-editor {
+  display: grid;
+  gap: 12px;
+}
+
+.role-config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -423,6 +482,66 @@ textarea {
 .hidden-role {
   filter: blur(12px);
   user-select: none;
+}
+
+.speech-stage {
+  display: grid;
+  gap: 16px;
+}
+
+.speaker-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: clamp(16px, 4vw, 26px);
+  background: var(--surface-strong);
+}
+
+.speaker-card h3 {
+  margin: 0;
+  font-size: clamp(26px, 6vw, 44px);
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+
+.speaker-card [data-countdown] {
+  color: var(--wolf);
+  font-size: 1.2em;
+}
+
+.speech-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.speech-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  border: 1px solid rgba(118, 107, 98, 0.18);
+  border-radius: 8px;
+  padding: 9px 12px;
+  background: #fffdf8;
+}
+
+.speech-item.current {
+  border-color: var(--gold);
+  background: #fff3dc;
+  box-shadow: inset 0 0 0 2px rgba(195, 131, 43, 0.22);
+}
+
+.speech-item span {
+  overflow-wrap: anywhere;
+}
+
+.speech-item strong {
+  white-space: nowrap;
 }
 
 .phase-strip {
@@ -621,6 +740,14 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .role-config-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .phase-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -642,6 +769,10 @@ textarea {
 
   .number-grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .role-config-grid {
+    grid-template-columns: 1fr;
   }
 
   .phase-strip {

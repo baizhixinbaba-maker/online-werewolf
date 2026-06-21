@@ -1,3 +1,3 @@
 # Online Werewolf
 
-Online Werewolf party game for 6 to 12 players.
+Online Werewolf party game with custom player counts and role setups.
