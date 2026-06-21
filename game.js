@@ -40,6 +40,8 @@ let state = {
   error: "",
   roleVisible: false,
   pollTimer: null,
+  isTyping: false,
+  pendingRoom: null,
 };
 
 function escapeHtml(value) {
@@ -123,6 +125,30 @@ function renderNotice() {
   if (state.error) return `<div class="notice danger">${escapeHtml(state.error)}</div>`;
   if (state.message) return `<div class="notice ok">${escapeHtml(state.message)}</div>`;
   return "";
+}
+
+function isTextInput(element) {
+  return Boolean(element?.matches?.("input, textarea"));
+}
+
+function canRenderNow() {
+  return !state.isTyping && !isTextInput(document.activeElement);
+}
+
+function renderOrDefer(room) {
+  if (room) state.pendingRoom = room;
+  if (!canRenderNow()) return;
+  if (state.pendingRoom) {
+    state.room = state.pendingRoom;
+    state.pendingRoom = null;
+  }
+  render();
+}
+
+function finishTyping() {
+  if (!state.isTyping && !state.pendingRoom) return;
+  state.isTyping = false;
+  renderOrDefer();
 }
 
 function renderPhaseStrip(current) {
@@ -243,6 +269,15 @@ function renderSeats(room) {
   `;
 }
 
+function renderRoomBadge(room) {
+  return `
+    <div class="room-badge ${room.isHost ? "host" : "player"}">
+      <strong>${room.isHost ? "房主控制台" : "玩家视角"}</strong>
+      <span>${room.isHost ? "只有本设备可以开始、结算或解散房间" : "等待房主开始或结算游戏"}</span>
+    </div>
+  `;
+}
+
 function renderRoom() {
   const room = state.room;
   if (!room) {
@@ -259,6 +294,7 @@ function renderRoom() {
           <h2>房间 ${room.code}</h2>
           <span class="status-tag alive">${room.joinedCount} / ${room.playerCount}</span>
         </div>
+        ${renderRoomBadge(room)}
         ${renderNotice()}
         <div class="notice">
           手机加入地址：${escapeHtml(joinUrl)}
@@ -272,7 +308,10 @@ function renderRoom() {
               <div class="actions">
                 ${
                   room.isHost
-                    ? `<button class="primary-button" type="button" data-start-room ${room.canStart ? "" : "disabled"}>随机分配身份并开始</button>`
+                    ? `
+                      <button class="primary-button" type="button" data-start-room ${room.canStart ? "" : "disabled"}>随机分配身份并开始</button>
+                      <button class="danger-button" type="button" data-disband-room>解散房间</button>
+                    `
                     : `<button class="secondary-button" type="button" disabled>等待房主开始</button>`
                 }
               </div>
@@ -311,6 +350,7 @@ function renderStartedControls(room) {
       <div class="actions">
         <button class="ok-button" type="button" data-end-room="good">宣布好人胜利</button>
         <button class="danger-button" type="button" data-end-room="werewolf">宣布狼人胜利</button>
+        <button class="danger-button" type="button" data-disband-room>解散房间</button>
       </div>
       ${
         room.log.length
@@ -393,13 +433,6 @@ async function createRoom() {
     startPolling();
     render();
   } catch (error) {
-    if (error.message.includes("房间不存在")) {
-      clearRoomSession();
-      state.joinCode = "";
-      setMessage("上一局房间已过期，请重新创建房间或加入新的邀请链接。");
-      render();
-      return;
-    }
     setMessage(error.message, true);
     render();
   }
@@ -442,13 +475,20 @@ async function refreshRoom() {
     if (token) params.set("token", token);
     if (state.joinSecret) params.set("invite", state.joinSecret);
     const data = await api(`/api/rooms/${encodeURIComponent(state.roomCode)}?${params.toString()}`);
-    state.room = data.room;
+    state.room = canRenderNow() ? data.room : state.room;
     state.joinSecret = data.room.joinSecret || state.joinSecret;
     if (data.room.status !== "started") state.roleVisible = false;
-    render();
+    renderOrDefer(data.room);
   } catch (error) {
+    if (error.message.includes("房间不存在")) {
+      clearRoomSession();
+      state.joinCode = "";
+      setMessage("房间已被房主解散或已过期，请重新创建房间或加入新的邀请链接。");
+      render();
+      return;
+    }
     setMessage(error.message, true);
-    render();
+    renderOrDefer();
   }
 }
 
@@ -481,6 +521,28 @@ async function endRoom(winner) {
   }
 }
 
+async function disbandRoom() {
+  if (!state.hostToken) {
+    setMessage("只有房主可以解散房间。", true);
+    render();
+    return;
+  }
+  if (!window.confirm("确定要解散这个房间吗？所有玩家都会回到首页。")) return;
+  try {
+    await api(`/api/rooms/${encodeURIComponent(state.roomCode)}/disband`, {
+      method: "POST",
+      body: JSON.stringify({ hostToken: state.hostToken }),
+    });
+    clearRoomSession();
+    state.joinCode = "";
+    setMessage("房间已解散，可以重新创建新房间。");
+    render();
+  } catch (error) {
+    setMessage(error.message, true);
+    render();
+  }
+}
+
 function startPolling() {
   stopPolling();
   state.pollTimer = window.setInterval(refreshRoom, 1400);
@@ -505,6 +567,7 @@ function clearRoomSession() {
   state.playerToken = "";
   state.joinSecret = "";
   state.roleVisible = false;
+  state.pendingRoom = null;
 }
 
 function resetLocal() {
@@ -539,6 +602,10 @@ function handleClick(event) {
     endRoom(button.dataset.endRoom);
     return;
   }
+  if (button.dataset.disbandRoom !== undefined) {
+    disbandRoom();
+    return;
+  }
   if (button.dataset.toggleRole !== undefined) {
     state.roleVisible = !state.roleVisible;
     render();
@@ -546,6 +613,7 @@ function handleClick(event) {
 }
 
 function handleInput(event) {
+  state.isTyping = true;
   if (event.target.dataset.joinCode !== undefined) {
     state.joinCode = event.target.value.replace(/\D/g, "").slice(0, 6);
     event.target.value = state.joinCode;
@@ -580,6 +648,12 @@ async function boot() {
 
 app.addEventListener("click", handleClick);
 app.addEventListener("input", handleInput);
+app.addEventListener("focusin", (event) => {
+  if (isTextInput(event.target)) state.isTyping = true;
+});
+app.addEventListener("focusout", (event) => {
+  if (isTextInput(event.target)) window.setTimeout(finishTyping, 120);
+});
 resetButton.addEventListener("click", resetLocal);
 
 boot();

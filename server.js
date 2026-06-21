@@ -28,6 +28,7 @@ const text = {
   needMoreSuffix: " \u540d\u73a9\u5bb6",
   rolesAssigned: "\u8eab\u4efd\u5df2\u968f\u673a\u5206\u914d\u3002\u8bf7\u6240\u6709\u73a9\u5bb6\u5728\u81ea\u5df1\u7684\u624b\u673a\u4e0a\u67e5\u770b\u8eab\u4efd\u3002",
   hostOnlyEnd: "\u53ea\u6709\u623f\u4e3b\u53ef\u4ee5\u7ed3\u675f\u6e38\u620f",
+  hostOnlyDisband: "\u53ea\u6709\u623f\u4e3b\u53ef\u4ee5\u89e3\u6563\u623f\u95f4",
   hostGoodWin: "\u623f\u4e3b\u5ba3\u5e03\u597d\u4eba\u9635\u8425\u80dc\u5229\u3002",
   hostWolfWin: "\u623f\u4e3b\u5ba3\u5e03\u72fc\u4eba\u9635\u8425\u80dc\u5229\u3002",
   invalidCount: "\u4eba\u6570\u5fc5\u987b\u662f 6 \u5230 12",
@@ -330,6 +331,15 @@ function endRoom(room, hostToken, winner) {
   room.log.push(room.winner === "werewolf" ? text.hostWolfWin : text.hostGoodWin);
 }
 
+function disbandRoom(room, hostToken) {
+  if (!secureCompare(hostToken, room.hostToken)) {
+    const error = new Error(text.hostOnlyDisband);
+    error.status = 403;
+    throw error;
+  }
+  rooms.delete(room.code);
+}
+
 async function handleApi(request, response, url) {
   try {
     if (!checkRateLimit(request, request.method === "GET" ? "read" : "write")) {
@@ -401,6 +411,13 @@ async function handleApi(request, response, url) {
       const body = await readBody(request);
       endRoom(room, body.hostToken, body.winner);
       sendJson(response, 200, { room: publicRoom(room, body.hostToken) });
+      return;
+    }
+
+    if (request.method === "POST" && action === "disband") {
+      const body = await readBody(request);
+      disbandRoom(room, body.hostToken);
+      sendJson(response, 200, { ok: true });
       return;
     }
 
