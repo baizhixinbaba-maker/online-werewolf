@@ -29,8 +29,8 @@ const text = {
   rolesAssigned: "\u8eab\u4efd\u5df2\u968f\u673a\u5206\u914d\u3002\u8bf7\u6240\u6709\u73a9\u5bb6\u5728\u81ea\u5df1\u7684\u624b\u673a\u4e0a\u67e5\u770b\u8eab\u4efd\u3002",
   hostOnlyEnd: "\u53ea\u6709\u623f\u4e3b\u53ef\u4ee5\u7ed3\u675f\u6e38\u620f",
   hostOnlyDisband: "\u53ea\u6709\u623f\u4e3b\u53ef\u4ee5\u89e3\u6563\u623f\u95f4",
-  hostGoodWin: "\u623f\u4e3b\u5ba3\u5e03\u597d\u4eba\u9635\u8425\u80dc\u5229\u3002",
-  hostWolfWin: "\u623f\u4e3b\u5ba3\u5e03\u72fc\u4eba\u9635\u8425\u80dc\u5229\u3002",
+  goodWin: "\u6240\u6709\u72fc\u4eba\u51fa\u5c40\uff0c\u597d\u4eba\u9635\u8425\u80dc\u5229\u3002",
+  wolfWin: "\u72fc\u4eba\u5df2\u5c60\u8fb9\uff0c\u72fc\u4eba\u9635\u8425\u80dc\u5229\u3002",
   invalidCount: "\u4eba\u6570\u5fc5\u987b\u662f 6 \u5230 12",
   apiMissing: "\u63a5\u53e3\u4e0d\u5b58\u5728",
   roomMissing: "\u623f\u95f4\u4e0d\u5b58\u5728",
@@ -110,7 +110,20 @@ function getRolesForCount(count) {
   return roleOrder.flatMap((role) => Array(config[role] || 0).fill(role));
 }
 
-function createRoom(playerCount) {
+function createPlayer(room, name, token = randomToken()) {
+  return {
+    id: randomToken(10),
+    token,
+    seat: room.players.length + 1,
+    name: sanitizeName(name, `${room.players.length + 1}${text.playerSuffix}`),
+    role: null,
+    alive: true,
+    ready: false,
+    checks: [],
+  };
+}
+
+function createRoom(playerCount, hostName) {
   const code = randomRoomCode();
   const hostToken = randomToken();
   const joinSecret = randomCode();
@@ -120,14 +133,57 @@ function createRoom(playerCount) {
     joinSecret,
     playerCount,
     status: "lobby",
+    phase: "lobby",
+    round: 0,
     players: [],
     createdAt: Date.now(),
     startedAt: null,
     log: [],
     winner: null,
+    announcement: "",
+    night: null,
+    day: null,
+    hunter: null,
+    witch: { healUsed: false, poisonUsed: false },
+    guardLastTargetId: null,
   };
+  room.players.push(createPlayer(room, hostName, hostToken));
   rooms.set(code, room);
   return room;
+}
+
+function alivePlayers(room) {
+  return room.players.filter((player) => player.alive);
+}
+
+function publicPlayer(player, viewer) {
+  return {
+    id: player.id,
+    seat: player.seat,
+    name: player.name,
+    alive: player.alive,
+    ready: player.ready,
+    role: undefined,
+    roleName: undefined,
+    isYou: Boolean(viewer && viewer.id === player.id),
+  };
+}
+
+function visibleDeaths(room) {
+  return room.log.slice(-8);
+}
+
+function nightActionDone(room, viewer) {
+  if (!viewer || room.phase !== "night" || !viewer.alive) return true;
+  if (viewer.role === "werewolf") return Boolean(room.night?.wolfTargetId);
+  if (viewer.role === "seer") return Boolean(room.night?.seerDone?.[viewer.id]);
+  if (viewer.role === "witch") return !witchNeedsAction(room) || Boolean(room.night?.witchDone);
+  if (viewer.role === "guard") return Boolean(room.night?.guardDone);
+  return true;
+}
+
+function dayVoteDone(room, viewer) {
+  return Boolean(viewer && room.phase === "day" && room.day?.votes?.[viewer.id]);
 }
 
 function publicRoom(room, viewerToken, viewerJoinSecret) {
@@ -140,31 +196,37 @@ function publicRoom(room, viewerToken, viewerJoinSecret) {
     joinSecret: isHost ? room.joinSecret : undefined,
     playerCount: room.playerCount,
     status: room.status,
+    phase: room.phase,
+    round: room.round,
+    announcement: room.announcement,
     canStart: room.players.length === room.playerCount && room.status === "lobby",
     joinedCount: room.players.length,
     config: playerConfigs[room.playerCount],
     roleMeta,
     players: canViewLobby
-      ? room.players.map((player) => ({
-          id: player.id,
-          seat: player.seat,
-          name: player.name,
-          alive: player.alive,
-          ready: player.ready,
-          role: room.status === "ended" ? player.role : undefined,
-          roleName: room.status === "ended" ? roleMeta[player.role]?.name : undefined,
-          isYou: Boolean(viewer && viewer.id === player.id),
-        }))
+      ? room.players.map((player) => {
+          const item = publicPlayer(player, viewer);
+          if (room.status === "ended") {
+            item.role = player.role;
+            item.roleName = roleMeta[player.role]?.name;
+          }
+          return item;
+        })
       : [],
     viewer: viewer
       ? {
           id: viewer.id,
           seat: viewer.seat,
           name: viewer.name,
+          alive: viewer.alive,
           role: viewer.role,
           roleName: viewer.role ? roleMeta[viewer.role].name : null,
           camp: viewer.role ? roleMeta[viewer.role].camp : null,
           campName: viewer.role ? roleMeta[viewer.role].campName : null,
+          checks: viewer.checks || [],
+          nightActionDone: nightActionDone(room, viewer),
+          dayVoteDone: dayVoteDone(room, viewer),
+          witch: viewer.role === "witch" ? witchViewerState(room) : null,
           teammates:
             viewer.role === "werewolf" && room.status !== "lobby"
               ? room.players
@@ -175,6 +237,11 @@ function publicRoom(room, viewerToken, viewerJoinSecret) {
       : null,
     isHost,
     log: isHost || room.status === "ended" ? room.log : [],
+    publicLog: visibleDeaths(room),
+    aliveCounts: getAliveCounts(room),
+    dayVotesSubmitted: room.phase === "day" ? Object.keys(room.day?.votes || {}).length : 0,
+    dayVotesNeeded: room.phase === "day" ? alivePlayers(room).length : 0,
+    hunter: room.phase === "hunter" ? { playerId: room.hunter?.playerId } : null,
     winner: room.winner,
   };
 }
@@ -277,17 +344,178 @@ function addPlayer(room, name, joinSecret) {
     error.status = 403;
     throw error;
   }
-  const player = {
-    id: randomToken(10),
-    token: randomToken(),
-    seat: room.players.length + 1,
-    name: sanitizeName(name, `${room.players.length + 1}${text.playerSuffix}`),
-    role: null,
-    alive: true,
-    ready: false,
-  };
+  const player = createPlayer(room, name);
   room.players.push(player);
   return player;
+}
+
+function getAliveCounts(room) {
+  const counts = { werewolf: 0, villager: 0, god: 0, good: 0 };
+  for (const player of room.players) {
+    if (!player.alive) continue;
+    const meta = roleMeta[player.role];
+    if (!meta) continue;
+    if (meta.camp === "werewolf") counts.werewolf += 1;
+    if (meta.camp === "good") counts.good += 1;
+    if (player.role === "villager") counts.villager += 1;
+    if (meta.camp === "good" && player.role !== "villager") counts.god += 1;
+  }
+  return counts;
+}
+
+function checkWinner(room) {
+  if (room.status !== "started") return false;
+  const counts = getAliveCounts(room);
+  if (counts.werewolf === 0) {
+    finishRoom(room, "good", text.goodWin);
+    return true;
+  }
+  if (counts.villager === 0 || counts.god === 0) {
+    finishRoom(room, "werewolf", text.wolfWin);
+    return true;
+  }
+  return false;
+}
+
+function finishRoom(room, winner, message) {
+  room.status = "ended";
+  room.phase = "ended";
+  room.winner = winner;
+  room.announcement = message;
+  room.log.push(message);
+}
+
+function makeNight(round) {
+  return {
+    round,
+    wolfTargetId: null,
+    seerDone: {},
+    guardTargetId: null,
+    guardDone: false,
+    witchHeal: false,
+    witchPoisonTargetId: null,
+    witchDone: false,
+  };
+}
+
+function makeDay() {
+  return { votes: {} };
+}
+
+function findPlayer(room, playerId) {
+  return room.players.find((player) => player.id === playerId);
+}
+
+function requireLivingViewer(room, token) {
+  const viewer = room.players.find((player) => player.token === token);
+  if (!viewer) {
+    const error = new Error("\u73a9\u5bb6\u4e0d\u5b58\u5728");
+    error.status = 403;
+    throw error;
+  }
+  if (!viewer.alive) {
+    const error = new Error("\u4f60\u5df2\u51fa\u5c40\uff0c\u4e0d\u80fd\u64cd\u4f5c");
+    error.status = 403;
+    throw error;
+  }
+  return viewer;
+}
+
+function requirePhase(room, phase) {
+  if (room.phase !== phase || room.status !== "started") {
+    const error = new Error("\u5f53\u524d\u9636\u6bb5\u4e0d\u80fd\u8fd9\u6837\u64cd\u4f5c");
+    error.status = 409;
+    throw error;
+  }
+}
+
+function roleError(role) {
+  const error = new Error(`\u53ea\u6709${roleMeta[role]?.name || role}\u53ef\u4ee5\u8fd9\u6837\u64cd\u4f5c`);
+  error.status = 403;
+  return error;
+}
+
+function validateAliveTarget(room, targetId, allowSelf = true) {
+  const target = findPlayer(room, targetId);
+  if (!target || !target.alive) {
+    const error = new Error("\u76ee\u6807\u4e0d\u5b58\u5728\u6216\u5df2\u51fa\u5c40");
+    error.status = 400;
+    throw error;
+  }
+  if (!allowSelf && target.id === targetId) {
+    const error = new Error("\u4e0d\u80fd\u9009\u62e9\u81ea\u5df1");
+    error.status = 400;
+    throw error;
+  }
+  return target;
+}
+
+function witchNeedsAction(room) {
+  return !room.witch.healUsed || !room.witch.poisonUsed;
+}
+
+function witchViewerState(room) {
+  const killed = room.night?.wolfTargetId ? findPlayer(room, room.night.wolfTargetId) : null;
+  return {
+    healUsed: room.witch.healUsed,
+    poisonUsed: room.witch.poisonUsed,
+    killed: killed ? { id: killed.id, seat: killed.seat, name: killed.name } : null,
+  };
+}
+
+function recordDeath(room, player, reason, hunterNextPhase = "night") {
+  if (!player.alive) return;
+  player.alive = false;
+  room.log.push(`${player.seat}\u53f7 ${player.name} ${reason}`);
+  if (player.role === "hunter" && reason !== "\u88ab\u5973\u5deb\u6bd2\u6740" && room.phase !== "hunter") {
+    room.hunter = { playerId: player.id, nextPhase: hunterNextPhase };
+    room.phase = "hunter";
+  }
+}
+
+function allNightDone(room) {
+  const livingRoles = new Set(alivePlayers(room).map((player) => player.role));
+  if (livingRoles.has("werewolf") && !room.night.wolfTargetId) return false;
+  if (livingRoles.has("seer")) {
+    const livingSeers = alivePlayers(room).filter((player) => player.role === "seer");
+    if (livingSeers.some((player) => !room.night.seerDone[player.id])) return false;
+  }
+  if (livingRoles.has("witch") && witchNeedsAction(room) && !room.night.witchDone) return false;
+  if (livingRoles.has("guard") && !room.night.guardDone) return false;
+  return true;
+}
+
+function resolveNight(room) {
+  const deaths = [];
+  const wolfTarget = room.night.wolfTargetId ? findPlayer(room, room.night.wolfTargetId) : null;
+  const guardedId = room.night.guardTargetId;
+  if (wolfTarget && wolfTarget.alive) {
+    const savedByGuard = guardedId && guardedId === wolfTarget.id;
+    const savedByWitch = room.night.witchHeal;
+    if (!savedByGuard && !savedByWitch) deaths.push([wolfTarget, "\u88ab\u72fc\u4eba\u51fb\u6740"]);
+  }
+  const poisoned = room.night.witchPoisonTargetId ? findPlayer(room, room.night.witchPoisonTargetId) : null;
+  if (poisoned && poisoned.alive && !deaths.some(([player]) => player.id === poisoned.id)) {
+    deaths.push([poisoned, "\u88ab\u5973\u5deb\u6bd2\u6740"]);
+  }
+  if (!deaths.length) room.log.push(`\u7b2c${room.round}\u591c \u5e73\u5b89\u591c`);
+  const nightAnnouncement = deaths.length
+    ? `\u6628\u665a\u6b7b\u4ea1\uff1a${deaths.map(([player]) => `${player.seat}\u53f7 ${player.name}`).join("\u3001")}`
+    : "\u6628\u665a\u5e73\u5b89\u591c";
+  for (const [player, reason] of deaths) recordDeath(room, player, reason, "day");
+  if (checkWinner(room) || room.phase === "hunter") return;
+  room.phase = "day";
+  room.day = makeDay();
+  room.announcement = nightAnnouncement;
+}
+
+function startNextNight(room) {
+  room.round += 1;
+  room.phase = "night";
+  room.night = makeNight(room.round);
+  room.day = null;
+  room.hunter = null;
+  room.announcement = `\u7b2c${room.round}\u591c\u5f00\u59cb`;
 }
 
 function startRoom(room, hostToken) {
@@ -318,17 +546,7 @@ function startRoom(room, hostToken) {
   room.status = "started";
   room.startedAt = Date.now();
   room.log = [text.rolesAssigned];
-}
-
-function endRoom(room, hostToken, winner) {
-  if (!secureCompare(hostToken, room.hostToken)) {
-    const error = new Error(text.hostOnlyEnd);
-    error.status = 403;
-    throw error;
-  }
-  room.status = "ended";
-  room.winner = winner === "werewolf" ? "werewolf" : "good";
-  room.log.push(room.winner === "werewolf" ? text.hostWolfWin : text.hostGoodWin);
+  startNextNight(room);
 }
 
 function disbandRoom(room, hostToken) {
@@ -338,6 +556,157 @@ function disbandRoom(room, hostToken) {
     throw error;
   }
   rooms.delete(room.code);
+}
+
+function wolfAction(room, token, targetId) {
+  requirePhase(room, "night");
+  const viewer = requireLivingViewer(room, token);
+  if (viewer.role !== "werewolf") throw roleError("werewolf");
+  const target = validateAliveTarget(room, targetId);
+  room.night.wolfTargetId = target.id;
+  if (allNightDone(room)) resolveNight(room);
+}
+
+function seerAction(room, token, targetId) {
+  requirePhase(room, "night");
+  const viewer = requireLivingViewer(room, token);
+  if (viewer.role !== "seer") throw roleError("seer");
+  if (room.night.seerDone[viewer.id]) {
+    const error = new Error("\u4eca\u665a\u5df2\u7ecf\u67e5\u9a8c\u8fc7");
+    error.status = 409;
+    throw error;
+  }
+  const target = validateAliveTarget(room, targetId);
+  const camp = roleMeta[target.role].camp === "werewolf" ? "werewolf" : "good";
+  viewer.checks = viewer.checks || [];
+  viewer.checks.push({
+    round: room.round,
+    seat: target.seat,
+    name: target.name,
+    camp,
+    result: camp === "werewolf" ? "\u72fc\u4eba" : "\u597d\u4eba",
+  });
+  room.night.seerDone[viewer.id] = true;
+  if (allNightDone(room)) resolveNight(room);
+}
+
+function witchAction(room, token, body) {
+  requirePhase(room, "night");
+  const viewer = requireLivingViewer(room, token);
+  if (viewer.role !== "witch") throw roleError("witch");
+  if (!room.night.wolfTargetId) {
+    const error = new Error("\u8bf7\u7b49\u72fc\u4eba\u5148\u9009\u62e9\u51fb\u6740\u76ee\u6807");
+    error.status = 409;
+    throw error;
+  }
+  if (room.night.witchDone) {
+    const error = new Error("\u4eca\u665a\u5df2\u7ecf\u64cd\u4f5c\u8fc7");
+    error.status = 409;
+    throw error;
+  }
+  const wantsHeal = Boolean(body.heal);
+  const poisonTargetId = String(body.poisonTargetId || "");
+  if (wantsHeal) {
+    if (room.witch.healUsed) {
+      const error = new Error("\u89e3\u836f\u5df2\u7ecf\u7528\u8fc7");
+      error.status = 400;
+      throw error;
+    }
+    if (!room.night.wolfTargetId) {
+      const error = new Error("\u4eca\u665a\u6ca1\u6709\u72fc\u4eba\u51fb\u6740\u76ee\u6807");
+      error.status = 400;
+      throw error;
+    }
+    room.night.witchHeal = true;
+    room.witch.healUsed = true;
+  }
+  if (poisonTargetId) {
+    if (room.witch.poisonUsed) {
+      const error = new Error("\u6bd2\u836f\u5df2\u7ecf\u7528\u8fc7");
+      error.status = 400;
+      throw error;
+    }
+    const target = validateAliveTarget(room, poisonTargetId);
+    room.night.witchPoisonTargetId = target.id;
+    room.witch.poisonUsed = true;
+  }
+  room.night.witchDone = true;
+  if (allNightDone(room)) resolveNight(room);
+}
+
+function guardAction(room, token, targetId) {
+  requirePhase(room, "night");
+  const viewer = requireLivingViewer(room, token);
+  if (viewer.role !== "guard") throw roleError("guard");
+  if (room.night.guardDone) {
+    const error = new Error("\u4eca\u665a\u5df2\u7ecf\u5b88\u62a4\u8fc7");
+    error.status = 409;
+    throw error;
+  }
+  const target = validateAliveTarget(room, targetId);
+  if (room.guardLastTargetId === target.id) {
+    const error = new Error("\u5b88\u536b\u4e0d\u80fd\u8fde\u7eed\u4e24\u665a\u5b88\u62a4\u540c\u4e00\u4eba");
+    error.status = 400;
+    throw error;
+  }
+  room.night.guardTargetId = target.id;
+  room.night.guardDone = true;
+  room.guardLastTargetId = target.id;
+  if (allNightDone(room)) resolveNight(room);
+}
+
+function voteAction(room, token, targetId) {
+  requirePhase(room, "day");
+  const viewer = requireLivingViewer(room, token);
+  const target = validateAliveTarget(room, targetId);
+  room.day.votes[viewer.id] = target.id;
+  if (Object.keys(room.day.votes).length < alivePlayers(room).length) return;
+
+  const tally = new Map();
+  for (const votedId of Object.values(room.day.votes)) {
+    tally.set(votedId, (tally.get(votedId) || 0) + 1);
+  }
+  const ordered = [...tally.entries()].sort((left, right) => right[1] - left[1]);
+  if (!ordered.length || (ordered[1] && ordered[0][1] === ordered[1][1])) {
+    room.log.push("\u767d\u5929\u6295\u7968\u5e73\u7968\uff0c\u65e0\u4eba\u51fa\u5c40");
+    if (!checkWinner(room)) startNextNight(room);
+    return;
+  }
+  const exiled = findPlayer(room, ordered[0][0]);
+  recordDeath(room, exiled, "\u88ab\u6295\u7968\u653e\u9010");
+  if (checkWinner(room) || room.phase === "hunter") return;
+  startNextNight(room);
+}
+
+function hunterAction(room, token, targetId) {
+  requirePhase(room, "hunter");
+  const hunter = room.players.find((player) => player.token === token && player.id === room.hunter?.playerId);
+  if (!hunter) {
+    const error = new Error("\u53ea\u6709\u6b7b\u4ea1\u7684\u730e\u4eba\u53ef\u4ee5\u5f00\u67aa");
+    error.status = 403;
+    throw error;
+  }
+  if (targetId) {
+    const target = findPlayer(room, targetId);
+    if (!target || !target.alive) {
+      const error = new Error("\u76ee\u6807\u4e0d\u5b58\u5728\u6216\u5df2\u51fa\u5c40");
+      error.status = 400;
+      throw error;
+    }
+    target.alive = false;
+    room.log.push(`${target.seat}\u53f7 ${target.name} \u88ab\u730e\u4eba\u5e26\u8d70`);
+  } else {
+    room.log.push("\u730e\u4eba\u9009\u62e9\u4e0d\u5f00\u67aa");
+  }
+  if (checkWinner(room)) return;
+  if (room.hunter?.nextPhase === "day") {
+    room.phase = "day";
+    room.day = makeDay();
+    room.announcement = "\u730e\u4eba\u5f00\u67aa\u540e\uff0c\u767d\u5929\u5f00\u59cb";
+    room.hunter = null;
+    return;
+  }
+  startNextNight(room);
 }
 
 async function handleApi(request, response, url) {
@@ -368,7 +737,7 @@ async function handleApi(request, response, url) {
         sendJson(response, 400, { error: text.invalidCount });
         return;
       }
-      const room = createRoom(playerCount);
+      const room = createRoom(playerCount, body.hostName);
       sendJson(response, 200, { room: publicRoom(room, room.hostToken), hostToken: room.hostToken });
       return;
     }
@@ -407,17 +776,52 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    if (request.method === "POST" && action === "end") {
-      const body = await readBody(request);
-      endRoom(room, body.hostToken, body.winner);
-      sendJson(response, 200, { room: publicRoom(room, body.hostToken) });
-      return;
-    }
-
     if (request.method === "POST" && action === "disband") {
       const body = await readBody(request);
       disbandRoom(room, body.hostToken);
       sendJson(response, 200, { ok: true });
+      return;
+    }
+
+    if (request.method === "POST" && action === "wolf") {
+      const body = await readBody(request);
+      wolfAction(room, body.playerToken, body.targetId);
+      sendJson(response, 200, { room: publicRoom(room, body.playerToken) });
+      return;
+    }
+
+    if (request.method === "POST" && action === "seer") {
+      const body = await readBody(request);
+      seerAction(room, body.playerToken, body.targetId);
+      sendJson(response, 200, { room: publicRoom(room, body.playerToken) });
+      return;
+    }
+
+    if (request.method === "POST" && action === "witch") {
+      const body = await readBody(request);
+      witchAction(room, body.playerToken, body);
+      sendJson(response, 200, { room: publicRoom(room, body.playerToken) });
+      return;
+    }
+
+    if (request.method === "POST" && action === "guard") {
+      const body = await readBody(request);
+      guardAction(room, body.playerToken, body.targetId);
+      sendJson(response, 200, { room: publicRoom(room, body.playerToken) });
+      return;
+    }
+
+    if (request.method === "POST" && action === "vote") {
+      const body = await readBody(request);
+      voteAction(room, body.playerToken, body.targetId);
+      sendJson(response, 200, { room: publicRoom(room, body.playerToken) });
+      return;
+    }
+
+    if (request.method === "POST" && action === "hunter") {
+      const body = await readBody(request);
+      hunterAction(room, body.playerToken, body.targetId);
+      sendJson(response, 200, { room: publicRoom(room, body.playerToken) });
       return;
     }
 

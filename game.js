@@ -35,7 +35,7 @@ let state = {
   roomCode: storage.getItem("werewolfRoomCode") || "",
   joinSecret: storage.getItem("werewolfJoinSecret") || "",
   joinCode: storage.getItem("werewolfRoomCode") || "",
-  playerName: storage.getItem("werewolfPlayerName") || "",
+  playerName: storage.getItem("werewolfPlayerName") || "房主",
   message: "",
   error: "",
   roleVisible: false,
@@ -121,6 +121,13 @@ function renderConfigList(count = state.playerCount) {
   `;
 }
 
+function renderPlayerOptions(players, includeEmpty = false) {
+  return `${includeEmpty ? '<option value="">不使用</option>' : ""}${players
+    .filter((player) => player.alive)
+    .map((player) => `<option value="${escapeHtml(player.id)}">${player.seat}号 ${escapeHtml(player.name)}</option>`)
+    .join("")}`;
+}
+
 function renderNotice() {
   if (state.error) return `<div class="notice danger">${escapeHtml(state.error)}</div>`;
   if (state.message) return `<div class="notice ok">${escapeHtml(state.message)}</div>`;
@@ -184,6 +191,10 @@ function renderHome() {
         </div>
         <p class="subtle">一台电脑启动服务并创建房间，其他玩家打开同一个游戏链接后输入房号加入。房主点开始后，系统随机分配身份，每个玩家只在自己的手机上看到自己的身份。</p>
         ${renderNotice()}
+        <label>
+          房主昵称
+          <input type="text" maxlength="16" value="${escapeHtml(state.playerName)}" data-player-name placeholder="输入房主名字" />
+        </label>
         <div>
           <div class="section-title">
             <h3>创建房间人数</h3>
@@ -316,7 +327,7 @@ function renderRoom() {
                 }
               </div>
             `
-            : renderStartedControls(room)
+            : renderGameControls(room)
         }
       `)}
       ${panel(`
@@ -333,7 +344,7 @@ function renderRoom() {
   `;
 }
 
-function renderStartedControls(room) {
+function renderGameControls(room) {
   if (room.status === "ended") {
     return `
       <div class="result-hero">
@@ -345,21 +356,19 @@ function renderStartedControls(room) {
   }
 
   if (room.isHost) {
-    return `
-      <div class="notice ok">身份已分配。为了防止提前泄露，房主也只管理胜负结算；玩家只能看到自己的身份。</div>
-      <div class="actions">
-        <button class="ok-button" type="button" data-end-room="good">宣布好人胜利</button>
-        <button class="danger-button" type="button" data-end-room="werewolf">宣布狼人胜利</button>
-        <button class="danger-button" type="button" data-disband-room>解散房间</button>
-      </div>
-      ${
-        room.log.length
-          ? `<ul class="records">${room.log.map((item) => `<li class="record-item"><span>${escapeHtml(item)}</span></li>`).join("")}</ul>`
-          : ""
-      }
-    `;
+    return `${renderPlayerPanel(room)}<div class="actions"><button class="danger-button" type="button" data-disband-room>解散房间</button></div>${renderPublicRecords(room)}`;
   }
 
+  return `${renderPlayerPanel(room)}${renderPublicRecords(room)}`;
+}
+
+function renderPublicRecords(room) {
+  return room.publicLog?.length
+    ? `<ul class="records">${room.publicLog.map((item) => `<li class="record-item"><span>${escapeHtml(item)}</span></li>`).join("")}</ul>`
+    : "";
+}
+
+function renderPlayerPanel(room) {
   const viewer = room.viewer;
   if (!viewer || !viewer.role) {
     return `<div class="notice">游戏已开始。请确认你是从自己的手机加入的玩家页面。</div>`;
@@ -382,7 +391,73 @@ function renderStartedControls(room) {
         <button class="primary-button" type="button" data-toggle-role>${state.roleVisible ? "隐藏身份" : "查看我的身份"}</button>
       </div>
     </div>
+    ${renderPhaseAction(room, viewer)}
   `;
+}
+
+function renderPhaseAction(room, viewer) {
+  if (!viewer.alive && room.phase !== "hunter") return `<div class="notice danger">你已出局，请等待游戏结束。</div>`;
+  if (room.phase === "night") return renderNightAction(room, viewer);
+  if (room.phase === "day") return renderVoteAction(room, viewer);
+  if (room.phase === "hunter") return renderHunterAction(room, viewer);
+  return "";
+}
+
+function renderNightAction(room, viewer) {
+  if (viewer.nightActionDone) return `<div class="notice ok">${room.announcement || "夜晚行动等待其他玩家完成。"}</div>`;
+  const options = renderPlayerOptions(room.players);
+  if (viewer.role === "werewolf") {
+    return panel(`
+      <div class="section-title"><h3>狼人行动</h3></div>
+      <label>击杀目标<select data-action-target>${options}</select></label>
+      <div class="actions"><button class="danger-button" type="button" data-night-action="wolf">确认击杀</button></div>
+    `);
+  }
+  if (viewer.role === "seer") {
+    return panel(`
+      <div class="section-title"><h3>预言家查验</h3></div>
+      <label>查验目标<select data-action-target>${options}</select></label>
+      <div class="actions"><button class="primary-button" type="button" data-night-action="seer">确认查验</button></div>
+      ${viewer.checks?.length ? `<ul class="records">${viewer.checks.map((item) => `<li class="record-item"><span>第${item.round}夜：${item.seat}号 ${escapeHtml(item.name)} 是 ${item.result}</span></li>`).join("")}</ul>` : ""}
+    `);
+  }
+  if (viewer.role === "witch") {
+    const killed = viewer.witch?.killed;
+    return panel(`
+      <div class="section-title"><h3>女巫行动</h3></div>
+      <div class="notice">${killed ? `今晚被杀：${killed.seat}号 ${escapeHtml(killed.name)}` : "今晚没有狼人击杀目标。"}</div>
+      <label><input type="checkbox" data-witch-heal ${viewer.witch?.healUsed || !killed ? "disabled" : ""} /> 使用解药</label>
+      <label>毒药目标<select data-witch-poison ${viewer.witch?.poisonUsed ? "disabled" : ""}>${renderPlayerOptions(room.players, true)}</select></label>
+      <div class="actions"><button class="primary-button" type="button" data-night-action="witch">确认女巫行动</button></div>
+    `);
+  }
+  if (viewer.role === "guard") {
+    return panel(`
+      <div class="section-title"><h3>守卫行动</h3></div>
+      <label>守护目标<select data-action-target>${options}</select></label>
+      <div class="actions"><button class="primary-button" type="button" data-night-action="guard">确认守护</button></div>
+    `);
+  }
+  return `<div class="notice">夜晚阶段，你没有夜晚技能，等待天亮。</div>`;
+}
+
+function renderVoteAction(room, viewer) {
+  if (viewer.dayVoteDone) return `<div class="notice ok">已投票，等待其他玩家。${room.dayVotesSubmitted} / ${room.dayVotesNeeded}</div>`;
+  return panel(`
+    <div class="section-title"><h3>白天投票</h3></div>
+    <div class="notice">${escapeHtml(room.announcement || "请发言后投票放逐一名玩家。")}</div>
+    <label>放逐目标<select data-action-target>${renderPlayerOptions(room.players)}</select></label>
+    <div class="actions"><button class="danger-button" type="button" data-day-vote>确认投票</button></div>
+  `);
+}
+
+function renderHunterAction(room, viewer) {
+  if (room.hunter?.playerId !== viewer.id) return `<div class="notice">等待猎人决定是否开枪。</div>`;
+  return panel(`
+    <div class="section-title"><h3>猎人开枪</h3></div>
+    <label>带走目标<select data-hunter-target>${renderPlayerOptions(room.players, true)}</select></label>
+    <div class="actions"><button class="danger-button" type="button" data-hunter-action>确认</button></div>
+  `);
 }
 
 function getRoleHelp(role) {
@@ -418,17 +493,18 @@ async function createRoom() {
     setMessage("");
     const data = await api("/api/rooms", {
       method: "POST",
-      body: JSON.stringify({ playerCount: state.playerCount }),
+      body: JSON.stringify({ playerCount: state.playerCount, hostName: state.playerName }),
     });
     state.room = data.room;
     state.roomCode = data.room.code;
     state.joinSecret = data.room.joinSecret || "";
     state.hostToken = data.hostToken;
-    state.playerToken = "";
+    state.playerToken = data.hostToken;
     storage.setItem("werewolfRoomCode", state.roomCode);
     storage.setItem("werewolfJoinSecret", state.joinSecret);
     storage.setItem("werewolfHostToken", state.hostToken);
-    storage.removeItem("werewolfPlayerToken");
+    storage.setItem("werewolfPlayerToken", state.playerToken);
+    storage.setItem("werewolfPlayerName", state.playerName);
     setMessage("房间已创建，请分享页面里的完整加入地址给朋友。");
     startPolling();
     render();
@@ -507,11 +583,11 @@ async function startRoom() {
   }
 }
 
-async function endRoom(winner) {
+async function submitPlayerAction(action, body) {
   try {
-    const data = await api(`/api/rooms/${encodeURIComponent(state.roomCode)}/end`, {
+    const data = await api(`/api/rooms/${encodeURIComponent(state.roomCode)}/${action}`, {
       method: "POST",
-      body: JSON.stringify({ hostToken: state.hostToken, winner }),
+      body: JSON.stringify({ playerToken: state.playerToken, ...body }),
     });
     state.room = data.room;
     render();
@@ -519,6 +595,29 @@ async function endRoom(winner) {
     setMessage(error.message, true);
     render();
   }
+}
+
+function selectedValue(selector) {
+  return app.querySelector(selector)?.value || "";
+}
+
+function submitNightAction(action) {
+  if (action === "witch") {
+    submitPlayerAction("witch", {
+      heal: Boolean(app.querySelector("[data-witch-heal]")?.checked),
+      poisonTargetId: selectedValue("[data-witch-poison]"),
+    });
+    return;
+  }
+  submitPlayerAction(action, { targetId: selectedValue("[data-action-target]") });
+}
+
+function submitVote() {
+  submitPlayerAction("vote", { targetId: selectedValue("[data-action-target]") });
+}
+
+function submitHunter() {
+  submitPlayerAction("hunter", { targetId: selectedValue("[data-hunter-target]") });
 }
 
 async function disbandRoom() {
@@ -598,12 +697,20 @@ function handleClick(event) {
     startRoom();
     return;
   }
-  if (button.dataset.endRoom) {
-    endRoom(button.dataset.endRoom);
-    return;
-  }
   if (button.dataset.disbandRoom !== undefined) {
     disbandRoom();
+    return;
+  }
+  if (button.dataset.nightAction) {
+    submitNightAction(button.dataset.nightAction);
+    return;
+  }
+  if (button.dataset.dayVote !== undefined) {
+    submitVote();
+    return;
+  }
+  if (button.dataset.hunterAction !== undefined) {
+    submitHunter();
     return;
   }
   if (button.dataset.toggleRole !== undefined) {
