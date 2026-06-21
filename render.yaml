@@ -8,3 +8,14 @@ services:
     startCommand: npm start
     healthCheckPath: /api/health
     autoDeploy: true
+    envVars:
+      - key: TURN_URLS
+        sync: false
+      - key: TURN_USERNAME
+        sync: false
+      - key: TURN_CREDENTIAL
+        sync: false
+      - key: TURN_SECRET
+        sync: false
+      - key: TURN_TTL_SECONDS
+        value: 3600

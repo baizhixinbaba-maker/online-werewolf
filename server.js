@@ -179,13 +179,35 @@ function publicTimeLimit(value) {
   return value === 0 ? null : value;
 }
 
+function splitTurnUrls(value) {
+  return String(value || "")
+    .split(/[\n,]+/)
+    .map((url) => url.trim())
+    .filter(Boolean);
+}
+
+function turnTtlSeconds() {
+  const ttl = Number(process.env.TURN_TTL_SECONDS || 3600);
+  return Number.isFinite(ttl) && ttl >= 60 ? Math.floor(ttl) : 3600;
+}
+
 function configuredIceServers() {
   const servers = [...voiceIceServers];
-  const turnUrl = String(process.env.TURN_URL || "").trim();
-  if (turnUrl) {
-    const turnServer = { urls: turnUrl };
-    const username = String(process.env.TURN_USERNAME || "").trim();
-    const credential = String(process.env.TURN_CREDENTIAL || "").trim();
+  const turnUrls = [
+    ...splitTurnUrls(process.env.TURN_URLS),
+    ...splitTurnUrls(process.env.TURN_URL),
+  ];
+  if (turnUrls.length) {
+    const turnServer = { urls: [...new Set(turnUrls)] };
+    const turnSecret = String(process.env.TURN_SECRET || "").trim();
+    const staticUsername = String(process.env.TURN_USERNAME || "").trim();
+    const staticCredential = String(process.env.TURN_CREDENTIAL || "").trim();
+    let username = staticUsername;
+    let credential = staticCredential;
+    if (turnSecret) {
+      username = `${Math.floor(Date.now() / 1000) + turnTtlSeconds()}:${staticUsername || "werewolf"}`;
+      credential = crypto.createHmac("sha1", turnSecret).update(username).digest("base64");
+    }
     if (username) turnServer.username = username;
     if (credential) turnServer.credential = credential;
     servers.push(turnServer);

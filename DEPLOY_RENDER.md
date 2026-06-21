@@ -67,5 +67,8 @@ https://online-werewolf-xxxx.onrender.com
 - 房间数据存在内存中，Render 重启或休眠恢复时可能清空房间。
 - Render 默认提供 HTTPS，浏览器语音聊天可以请求麦克风权限。
 - 语音聊天使用 WebRTC。若不同网络下显示语音在线但没有声音，通常需要配置 TURN 中继服务器。
-- 可在 Render 环境变量里配置：`TURN_URL`、`TURN_USERNAME`、`TURN_CREDENTIAL`。
+- 可在 Render 环境变量里配置：`TURN_URLS`、`TURN_USERNAME`、`TURN_CREDENTIAL`。
+- `TURN_URLS` 支持多个地址，用英文逗号分隔。建议同时填写 UDP、TCP 和 TLS，例如：`turn:example.com:3478?transport=udp,turn:example.com:3478?transport=tcp,turns:example.com:5349?transport=tcp`。
+- 如果你的 TURN 服务商只给了一个地址，也可以继续使用旧变量 `TURN_URL`。
+- 如果 TURN 服务支持共享密钥，可配置 `TURN_SECRET` 代替 `TURN_CREDENTIAL`，系统会按 `TURN_TTL_SECONDS` 自动生成短期密码，默认 3600 秒。
 - 如果大陆访问慢或打不开，最终还是建议国内云服务器。
