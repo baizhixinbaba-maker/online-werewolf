@@ -179,6 +179,20 @@ function publicTimeLimit(value) {
   return value === 0 ? null : value;
 }
 
+function configuredIceServers() {
+  const servers = [...voiceIceServers];
+  const turnUrl = String(process.env.TURN_URL || "").trim();
+  if (turnUrl) {
+    const turnServer = { urls: turnUrl };
+    const username = String(process.env.TURN_USERNAME || "").trim();
+    const credential = String(process.env.TURN_CREDENTIAL || "").trim();
+    if (username) turnServer.username = username;
+    if (credential) turnServer.credential = credential;
+    servers.push(turnServer);
+  }
+  return servers;
+}
+
 function createPlayer(room, name, token = randomToken()) {
   return {
     id: randomToken(10),
@@ -502,7 +516,7 @@ function joinVoice(room, token) {
   return {
     playerId: viewer.id,
     participants: getVoiceParticipants(room),
-    iceServers: voiceIceServers,
+    iceServers: configuredIceServers(),
     lastSignalId: voice.nextMessageId - 1,
   };
 }

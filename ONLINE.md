@@ -45,5 +45,5 @@ Send the generated public `https://...` URL to players. Keep both the game serve
 - Rooms are automatically removed after 8 hours.
 - Players should use the full invite link, or manually enter both the room code and invite code. Room code only is not enough.
 - Daytime now has last words, ordered discussion, countdowns, skip controls, speech records, and then voting. The host can end or skip the current speaker.
-- Voice chat uses browser microphone permission and WebRTC. It needs HTTPS for remote play. Without a TURN server, a few strict networks may fail to connect peer-to-peer audio.
+- Voice chat uses browser microphone permission and WebRTC. It needs HTTPS for remote play. If players show as voice-online but cannot hear each other, configure a TURN relay with `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL`.
 - Do not use `open-game.bat`; online play must go through `start.bat`, `npm start`, or a deployed server URL.

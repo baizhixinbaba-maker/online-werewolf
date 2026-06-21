@@ -52,6 +52,7 @@ let state = {
   voiceMuted: false,
   voiceStatus: "",
   voiceError: "",
+  voiceNeedsPlayback: false,
   voiceParticipants: [],
   voiceSyncTimer: null,
   voiceLastSignalId: 0,
@@ -489,6 +490,7 @@ function renderVoicePanel(room) {
           state.voiceEnabled
             ? `
               <button class="secondary-button" type="button" data-voice-mute>${state.voiceMuted ? "取消静音" : "静音"}</button>
+              ${state.voiceNeedsPlayback ? `<button class="primary-button" type="button" data-voice-play>播放声音</button>` : ""}
               <button class="ghost-button" type="button" data-voice-leave>关闭语音</button>
             `
             : `<button class="secondary-button" type="button" data-voice-join>开启语音</button>`
@@ -779,6 +781,7 @@ async function joinVoice() {
     });
     state.voiceEnabled = true;
     state.voiceMuted = false;
+    state.voiceNeedsPlayback = false;
     state.voicePlayerId = data.playerId;
     state.voiceParticipants = data.participants || [];
     state.voiceIceServers = data.iceServers || [];
@@ -856,6 +859,7 @@ function stopVoice() {
   stopLocalVoice();
   state.voiceEnabled = false;
   state.voiceMuted = false;
+  state.voiceNeedsPlayback = false;
   state.voiceStatus = "";
   state.voiceError = "";
   state.voiceParticipants = [];
@@ -902,11 +906,29 @@ function ensureVoicePeer(peerId) {
       peer.audio = document.createElement("audio");
       peer.audio.autoplay = true;
       peer.audio.playsInline = true;
+      peer.audio.controls = false;
       document.body.appendChild(peer.audio);
     }
     peer.audio.srcObject = event.streams[0];
+    peer.audio.play().then(() => {
+      state.voiceNeedsPlayback = false;
+      state.voiceStatus = "语音已连接";
+      updateVoicePanelOnly();
+    }).catch(() => {
+      state.voiceNeedsPlayback = true;
+      state.voiceStatus = "浏览器拦截了声音播放，请点击播放声音";
+      updateVoicePanelOnly();
+    });
   };
   connection.onconnectionstatechange = () => {
+    if (connection.connectionState === "connected") {
+      state.voiceStatus = "语音已连接";
+      updateVoicePanelOnly();
+    }
+    if (["checking", "connecting"].includes(connection.connectionState)) {
+      state.voiceStatus = "正在连接语音...";
+      updateVoicePanelOnly();
+    }
     if (["failed", "closed", "disconnected"].includes(connection.connectionState)) {
       state.voiceStatus = "语音正在重连...";
       updateVoicePanelOnly();
@@ -952,6 +974,17 @@ function cleanupVoicePeers() {
     peer.audio?.remove();
     state.peers.delete(peerId);
   }
+}
+
+function playRemoteVoice() {
+  const plays = [...state.peers.values()]
+    .filter((peer) => peer.audio)
+    .map((peer) => peer.audio.play());
+  Promise.allSettled(plays).then((results) => {
+    state.voiceNeedsPlayback = results.some((result) => result.status === "rejected");
+    state.voiceStatus = state.voiceNeedsPlayback ? "仍无法播放声音，请检查浏览器声音权限" : "语音已连接";
+    render();
+  });
 }
 
 function updateVoicePanelOnly() {
@@ -1354,6 +1387,10 @@ function handleClick(event) {
   }
   if (button.dataset.voiceMute !== undefined) {
     toggleVoiceMute();
+    return;
+  }
+  if (button.dataset.voicePlay !== undefined) {
+    playRemoteVoice();
     return;
   }
   if (button.dataset.voiceLeave !== undefined) {

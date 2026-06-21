@@ -66,5 +66,6 @@ https://online-werewolf-xxxx.onrender.com
 - Render 免费服务会休眠，第一次打开可能要等几十秒。
 - 房间数据存在内存中，Render 重启或休眠恢复时可能清空房间。
 - Render 默认提供 HTTPS，浏览器语音聊天可以请求麦克风权限。
-- 语音聊天使用 WebRTC 点对点音频；当前没有配置 TURN 服务器，少数严格 NAT 网络下可能无法连通。
+- 语音聊天使用 WebRTC。若不同网络下显示语音在线但没有声音，通常需要配置 TURN 中继服务器。
+- 可在 Render 环境变量里配置：`TURN_URL`、`TURN_USERNAME`、`TURN_CREDENTIAL`。
 - 如果大陆访问慢或打不开，最终还是建议国内云服务器。
