@@ -92,6 +92,15 @@ textarea {
   color: var(--ink);
 }
 
+.action-select {
+  max-width: 560px;
+}
+
+.action-select select {
+  min-height: 52px;
+  font-size: 16px;
+}
+
 textarea {
   min-height: 88px;
   resize: vertical;

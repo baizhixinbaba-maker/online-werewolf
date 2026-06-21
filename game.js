@@ -62,6 +62,7 @@ let state = {
   peers: new Map(),
   isTyping: false,
   pendingRoom: null,
+  actionSelections: {},
 };
 
 function escapeHtml(value) {
@@ -287,11 +288,19 @@ function renderRoleConfigEditor() {
   `;
 }
 
-function renderPlayerOptions(players, includeEmpty = false) {
-  return `${includeEmpty ? '<option value="">不使用</option>' : ""}${players
+function renderPlayerOptions(players, includeEmpty = false, selectedValue = "") {
+  const emptySelected = selectedValue === "" ? " selected" : "";
+  return `${includeEmpty ? `<option value=""${emptySelected}>不使用</option>` : ""}${players
     .filter((player) => player.alive)
-    .map((player) => `<option value="${escapeHtml(player.id)}">${player.seat}号 ${escapeHtml(player.name)}</option>`)
+    .map((player) => {
+      const selected = String(player.id) === String(selectedValue) ? " selected" : "";
+      return `<option value="${escapeHtml(player.id)}"${selected}>${player.seat}号 ${escapeHtml(player.name)}</option>`;
+    })
     .join("")}`;
+}
+
+function actionSelectionKey(room, viewer, purpose) {
+  return [room?.code || "room", room?.phase || "phase", room?.round || 0, viewer?.id || "viewer", purpose].join(":");
 }
 
 function renderNotice() {
@@ -300,12 +309,12 @@ function renderNotice() {
   return "";
 }
 
-function isTextInput(element) {
-  return Boolean(element?.matches?.("input, textarea"));
+function isEditingControl(element) {
+  return Boolean(element?.matches?.("input, textarea, select"));
 }
 
 function canRenderNow() {
-  return !state.isTyping && !isTextInput(document.activeElement);
+  return !state.isTyping && !isEditingControl(document.activeElement);
 }
 
 function renderOrDefer(room) {
@@ -646,36 +655,40 @@ function renderPhaseAction(room, viewer) {
 
 function renderNightAction(room, viewer) {
   if (viewer.nightActionDone) return `<div class="notice ok">${room.announcement || "夜晚行动等待其他玩家完成。"}</div>`;
-  const options = renderPlayerOptions(room.players);
+  const targetKey = actionSelectionKey(room, viewer, `${viewer.role}-target`);
+  const selectedTarget = state.actionSelections[targetKey] || "";
+  const options = renderPlayerOptions(room.players, false, selectedTarget);
   if (viewer.role === "werewolf") {
     return panel(`
       <div class="section-title"><h3>狼人行动</h3></div>
-      <label>击杀目标<select data-action-target>${options}</select></label>
+      <label class="action-select">击杀目标<select data-action-target data-selection-key="${targetKey}">${options}</select></label>
       <div class="actions"><button class="danger-button" type="button" data-night-action="wolf">确认击杀</button></div>
     `);
   }
   if (viewer.role === "seer") {
     return panel(`
       <div class="section-title"><h3>预言家查验</h3></div>
-      <label>查验目标<select data-action-target>${options}</select></label>
+      <label class="action-select">查验目标<select data-action-target data-selection-key="${targetKey}">${options}</select></label>
       <div class="actions"><button class="primary-button" type="button" data-night-action="seer">确认查验</button></div>
       ${viewer.checks?.length ? `<ul class="records">${viewer.checks.map((item) => `<li class="record-item"><span>第${item.round}夜：${item.seat}号 ${escapeHtml(item.name)} 是 ${item.result}</span></li>`).join("")}</ul>` : ""}
     `);
   }
   if (viewer.role === "witch") {
     const killed = viewer.witch?.killed;
+    const poisonKey = actionSelectionKey(room, viewer, "witch-poison");
+    const selectedPoison = state.actionSelections[poisonKey] || "";
     return panel(`
       <div class="section-title"><h3>女巫行动</h3></div>
       <div class="notice">${killed ? `今晚被杀：${killed.seat}号 ${escapeHtml(killed.name)}` : "今晚没有狼人击杀目标。"}</div>
       <label><input type="checkbox" data-witch-heal ${viewer.witch?.healUsed || !killed ? "disabled" : ""} /> 使用解药</label>
-      <label>毒药目标<select data-witch-poison ${viewer.witch?.poisonUsed ? "disabled" : ""}>${renderPlayerOptions(room.players, true)}</select></label>
+      <label class="action-select">毒药目标<select data-witch-poison data-selection-key="${poisonKey}" ${viewer.witch?.poisonUsed ? "disabled" : ""}>${renderPlayerOptions(room.players, true, selectedPoison)}</select></label>
       <div class="actions"><button class="primary-button" type="button" data-night-action="witch">确认女巫行动</button></div>
     `);
   }
   if (viewer.role === "guard") {
     return panel(`
       <div class="section-title"><h3>守卫行动</h3></div>
-      <label>守护目标<select data-action-target>${options}</select></label>
+      <label class="action-select">守护目标<select data-action-target data-selection-key="${targetKey}">${options}</select></label>
       <div class="actions"><button class="primary-button" type="button" data-night-action="guard">确认守护</button></div>
     `);
   }
@@ -749,10 +762,12 @@ function speechStatusLabel(status) {
 
 function renderVoteAction(room, viewer) {
   if (viewer.dayVoteDone) return `<div class="notice ok">已投票，等待其他玩家。${room.dayVotesSubmitted} / ${room.dayVotesNeeded}</div>`;
+  const voteKey = actionSelectionKey(room, viewer, "day-vote");
+  const selectedVote = state.actionSelections[voteKey] || "";
   return panel(`
     <div class="section-title"><h3>白天投票</h3></div>
     <div class="notice">${escapeHtml(room.announcement || "请发言后投票放逐一名玩家。")}</div>
-    <label>放逐目标<select data-action-target>${renderPlayerOptions(room.players)}</select></label>
+    <label class="action-select">放逐目标<select data-action-target data-selection-key="${voteKey}">${renderPlayerOptions(room.players, false, selectedVote)}</select></label>
     <div class="actions"><button class="danger-button" type="button" data-day-vote>确认投票</button></div>
   `);
 }
@@ -1012,9 +1027,11 @@ function updateVoicePanelOnly() {
 
 function renderHunterAction(room, viewer) {
   if (room.hunter?.playerId !== viewer.id) return `<div class="notice">等待猎人决定是否开枪。</div>`;
+  const hunterKey = actionSelectionKey(room, viewer, "hunter-target");
+  const selectedHunterTarget = state.actionSelections[hunterKey] || "";
   return panel(`
     <div class="section-title"><h3>猎人开枪</h3></div>
-    <label>带走目标<select data-hunter-target>${renderPlayerOptions(room.players, true)}</select></label>
+    <label class="action-select">带走目标<select data-hunter-target data-selection-key="${hunterKey}">${renderPlayerOptions(room.players, true, selectedHunterTarget)}</select></label>
     <div class="actions"><button class="danger-button" type="button" data-hunter-action>确认</button></div>
   `);
 }
@@ -1338,6 +1355,7 @@ function clearRoomSession() {
   state.inviteCode = "";
   state.roleVisible = false;
   state.pendingRoom = null;
+  state.actionSelections = {};
 }
 
 function resetLocal() {
@@ -1488,6 +1506,12 @@ function handleInput(event) {
   }
 }
 
+function handleChange(event) {
+  if (event.target.dataset.selectionKey !== undefined) {
+    state.actionSelections[event.target.dataset.selectionKey] = event.target.value;
+  }
+}
+
 async function boot() {
   const params = new URLSearchParams(window.location.search);
   const roomFromUrl = (params.get("room") || "").replace(/\D/g, "").slice(0, 6);
@@ -1514,11 +1538,12 @@ async function boot() {
 
 app.addEventListener("click", handleClick);
 app.addEventListener("input", handleInput);
+app.addEventListener("change", handleChange);
 app.addEventListener("focusin", (event) => {
-  if (isTextInput(event.target)) state.isTyping = true;
+  if (isEditingControl(event.target)) state.isTyping = true;
 });
 app.addEventListener("focusout", (event) => {
-  if (isTextInput(event.target)) window.setTimeout(finishTyping, 120);
+  if (isEditingControl(event.target)) window.setTimeout(finishTyping, 120);
 });
 resetButton.addEventListener("click", resetLocal);
 
