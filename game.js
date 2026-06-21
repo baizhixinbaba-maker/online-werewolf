@@ -35,6 +35,7 @@ let state = {
   roomCode: storage.getItem("werewolfRoomCode") || "",
   joinSecret: storage.getItem("werewolfJoinSecret") || "",
   joinCode: storage.getItem("werewolfRoomCode") || "",
+  inviteCode: "",
   playerName: storage.getItem("werewolfPlayerName") || "房主",
   message: "",
   error: "",
@@ -226,6 +227,10 @@ function renderHome() {
           <input type="text" inputmode="numeric" maxlength="6" value="${escapeHtml(state.joinCode)}" data-join-code placeholder="例如 123456" />
         </label>
         <label>
+          邀请码
+          <input type="text" maxlength="12" value="${escapeHtml(state.inviteCode || state.joinSecret)}" data-invite-code placeholder="房主页面显示的邀请码" />
+        </label>
+        <label>
           你的昵称
           <input type="text" maxlength="16" value="${escapeHtml(state.playerName)}" data-player-name placeholder="输入你的名字" />
         </label>
@@ -310,7 +315,8 @@ function renderRoom() {
         <div class="notice">
           手机加入地址：${escapeHtml(joinUrl)}
           <br />
-          其他玩家打开房主分享的完整链接后输入房间号：${room.code}
+          房间号：${room.code}
+          ${room.joinSecret ? `<br />邀请码：${escapeHtml(room.joinSecret)}` : ""}
         </div>
         ${
           room.status === "lobby"
@@ -519,14 +525,17 @@ async function joinRoom() {
     setMessage("");
     const code = state.joinCode.trim();
     if (!code) throw new Error("请输入房间号");
+    const invite = (state.inviteCode || state.joinSecret).trim();
+    if (!invite) throw new Error("请输入邀请码，或使用房主分享的完整链接加入");
     if (!state.playerName.trim()) throw new Error("请输入昵称");
     const data = await api(`/api/rooms/${encodeURIComponent(code)}/join`, {
       method: "POST",
-      body: JSON.stringify({ name: state.playerName, joinSecret: state.joinSecret }),
+      body: JSON.stringify({ name: state.playerName, joinSecret: invite }),
     });
     state.room = data.room;
     state.roomCode = code;
     state.joinSecret = data.room.joinSecret || state.joinSecret;
+    state.inviteCode = state.joinSecret;
     state.playerToken = data.playerToken;
     state.hostToken = "";
     storage.setItem("werewolfRoomCode", state.roomCode);
@@ -665,6 +674,7 @@ function clearRoomSession() {
   state.hostToken = "";
   state.playerToken = "";
   state.joinSecret = "";
+  state.inviteCode = "";
   state.roleVisible = false;
   state.pendingRoom = null;
 }
@@ -725,6 +735,11 @@ function handleInput(event) {
     state.joinCode = event.target.value.replace(/\D/g, "").slice(0, 6);
     event.target.value = state.joinCode;
   }
+  if (event.target.dataset.inviteCode !== undefined) {
+    state.inviteCode = event.target.value.replace(/[^A-Za-z0-9]/g, "").slice(0, 12);
+    state.joinSecret = state.inviteCode;
+    event.target.value = state.inviteCode;
+  }
   if (event.target.dataset.playerName !== undefined) {
     state.playerName = event.target.value;
   }
@@ -743,6 +758,7 @@ async function boot() {
   }
   if (inviteFromUrl) {
     state.joinSecret = inviteFromUrl.replace(/[^A-Za-z0-9]/g, "").slice(0, 32);
+    state.inviteCode = state.joinSecret;
     storage.setItem("werewolfJoinSecret", state.joinSecret);
   }
   await loadConfigs();

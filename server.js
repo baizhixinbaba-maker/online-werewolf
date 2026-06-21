@@ -340,7 +340,7 @@ function addPlayer(room, name, joinSecret) {
     throw error;
   }
   if (!secureCompare(joinSecret, room.joinSecret)) {
-    const error = new Error("\u623f\u95f4\u9080\u8bf7\u7801\u4e0d\u6b63\u786e\uff0c\u8bf7\u4f7f\u7528\u623f\u4e3b\u5206\u4eab\u7684\u5b8c\u6574\u94fe\u63a5\u52a0\u5165");
+    const error = new Error("\u623f\u95f4\u9080\u8bf7\u7801\u4e0d\u6b63\u786e\uff0c\u8bf7\u8f93\u5165\u623f\u4e3b\u9875\u9762\u663e\u793a\u7684\u9080\u8bf7\u7801\uff0c\u6216\u4f7f\u7528\u623f\u4e3b\u5206\u4eab\u7684\u5b8c\u6574\u94fe\u63a5");
     error.status = 403;
     throw error;
   }
