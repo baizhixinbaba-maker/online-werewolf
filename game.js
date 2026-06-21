@@ -82,6 +82,40 @@ function roomInviteUrl(room) {
   return url.toString();
 }
 
+function parseInviteText(value) {
+  const rawText = String(value || "").trim();
+  if (!rawText) return false;
+
+  let foundRoom = "";
+  let foundInvite = "";
+
+  try {
+    const url = new URL(rawText, window.location.origin);
+    foundRoom = (url.searchParams.get("room") || "").replace(/\D/g, "").slice(0, 6);
+    foundInvite = (url.searchParams.get("invite") || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 32);
+  } catch (error) {
+    // Plain room info copied from the host page is handled by the regex fallback below.
+  }
+
+  if (!foundRoom) {
+    const roomMatch = rawText.match(/(?:房间号|房间码|room)\s*[：:=]?\s*(\d{6})/i) || rawText.match(/\b(\d{6})\b/);
+    foundRoom = roomMatch ? roomMatch[1] : "";
+  }
+
+  if (!foundInvite) {
+    const inviteMatch = rawText.match(/(?:邀请码|invite)\s*[：:=]?\s*([A-Za-z0-9]{6,32})/i);
+    foundInvite = inviteMatch ? inviteMatch[1].replace(/[^A-Za-z0-9]/g, "").slice(0, 32) : "";
+  }
+
+  if (!foundRoom && !foundInvite) return false;
+  if (foundRoom) state.joinCode = foundRoom;
+  if (foundInvite) {
+    state.inviteCode = foundInvite;
+    state.joinSecret = foundInvite;
+  }
+  return true;
+}
+
 function setMessage(message, isError = false) {
   state.message = isError ? "" : message;
   state.error = isError ? message : "";
@@ -224,12 +258,13 @@ function renderHome() {
         </div>
         <label>
           房间号
-          <input type="text" inputmode="numeric" maxlength="6" value="${escapeHtml(state.joinCode)}" data-join-code placeholder="例如 123456" />
+          <input type="text" inputmode="numeric" maxlength="160" value="${escapeHtml(state.joinCode)}" data-join-code placeholder="房间号或完整邀请链接" />
         </label>
         <label>
           邀请码
-          <input type="text" maxlength="12" value="${escapeHtml(state.inviteCode || state.joinSecret)}" data-invite-code placeholder="房主页面显示的邀请码" />
+          <input type="text" maxlength="160" value="${escapeHtml(state.inviteCode || state.joinSecret)}" data-invite-code placeholder="房主页面显示的邀请码" />
         </label>
+        <div class="notice">手动加入需要房间号和邀请码；也可以直接粘贴房主分享的完整邀请链接。</div>
         <label>
           你的昵称
           <input type="text" maxlength="16" value="${escapeHtml(state.playerName)}" data-player-name placeholder="输入你的名字" />
@@ -312,12 +347,25 @@ function renderRoom() {
         </div>
         ${renderRoomBadge(room)}
         ${renderNotice()}
-        <div class="notice">
-          手机加入地址：${escapeHtml(joinUrl)}
-          <br />
-          房间号：${room.code}
-          ${room.joinSecret ? `<br />邀请码：${escapeHtml(room.joinSecret)}` : ""}
+        <div class="notice share-box">
+          <div class="share-row">
+            <span>完整加入链接</span>
+            <strong>${escapeHtml(joinUrl)}</strong>
+          </div>
+          <div class="share-row">
+            <span>房间号</span>
+            <strong>${room.code}</strong>
+          </div>
+          ${room.joinSecret ? `<div class="share-row"><span>邀请码</span><strong>${escapeHtml(room.joinSecret)}</strong></div>` : ""}
         </div>
+        ${
+          room.joinSecret
+            ? `<div class="actions">
+                <button class="secondary-button" type="button" data-copy-link>复制完整邀请链接</button>
+                <button class="ghost-button" type="button" data-copy-room-info>复制房间号和邀请码</button>
+              </div>`
+            : ""
+        }
         ${
           room.status === "lobby"
             ? `
@@ -526,7 +574,7 @@ async function joinRoom() {
     const code = state.joinCode.trim();
     if (!code) throw new Error("请输入房间号");
     const invite = (state.inviteCode || state.joinSecret).trim();
-    if (!invite) throw new Error("请输入邀请码，或使用房主分享的完整链接加入");
+    if (!invite) throw new Error("只输入房间号不能加入，请再输入邀请码，或直接粘贴房主分享的完整邀请链接");
     if (!state.playerName.trim()) throw new Error("请输入昵称");
     const data = await api(`/api/rooms/${encodeURIComponent(code)}/join`, {
       method: "POST",
@@ -550,6 +598,40 @@ async function joinRoom() {
     setMessage(error.message, true);
     render();
   }
+}
+
+async function copyText(textToCopy, successMessage) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(textToCopy);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = textToCopy;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+    setMessage(successMessage);
+  } catch (error) {
+    setMessage("复制失败，请手动复制页面里的加入信息。", true);
+  }
+  render();
+}
+
+function copyInviteLink() {
+  if (!state.room) return;
+  copyText(roomInviteUrl(state.room), "已复制完整邀请链接，发给朋友后他们打开即可自动填好房间信息。");
+}
+
+function copyRoomInfo() {
+  if (!state.room) return;
+  const info = [`房间号：${state.room.code}`];
+  if (state.room.joinSecret) info.push(`邀请码：${state.room.joinSecret}`);
+  copyText(info.join("\n"), "已复制房间号和邀请码。");
 }
 
 async function refreshRoom() {
@@ -703,6 +785,14 @@ function handleClick(event) {
     joinRoom();
     return;
   }
+  if (button.dataset.copyLink !== undefined) {
+    copyInviteLink();
+    return;
+  }
+  if (button.dataset.copyRoomInfo !== undefined) {
+    copyRoomInfo();
+    return;
+  }
   if (button.dataset.startRoom !== undefined) {
     startRoom();
     return;
@@ -732,11 +822,25 @@ function handleClick(event) {
 function handleInput(event) {
   state.isTyping = true;
   if (event.target.dataset.joinCode !== undefined) {
-    state.joinCode = event.target.value.replace(/\D/g, "").slice(0, 6);
+    const rawValue = event.target.value;
+    if (parseInviteText(rawValue)) {
+      event.target.value = state.joinCode;
+      const inviteInput = app.querySelector("[data-invite-code]");
+      if (inviteInput) inviteInput.value = state.inviteCode || state.joinSecret;
+      return;
+    }
+    state.joinCode = rawValue.replace(/\D/g, "").slice(0, 6);
     event.target.value = state.joinCode;
   }
   if (event.target.dataset.inviteCode !== undefined) {
-    state.inviteCode = event.target.value.replace(/[^A-Za-z0-9]/g, "").slice(0, 12);
+    const rawValue = event.target.value;
+    if (parseInviteText(rawValue)) {
+      event.target.value = state.inviteCode || state.joinSecret;
+      const codeInput = app.querySelector("[data-join-code]");
+      if (codeInput) codeInput.value = state.joinCode;
+      return;
+    }
+    state.inviteCode = rawValue.replace(/[^A-Za-z0-9]/g, "").slice(0, 32);
     state.joinSecret = state.inviteCode;
     event.target.value = state.inviteCode;
   }
