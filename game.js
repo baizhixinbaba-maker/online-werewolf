@@ -393,6 +393,13 @@ async function createRoom() {
     startPolling();
     render();
   } catch (error) {
+    if (error.message.includes("房间不存在")) {
+      clearRoomSession();
+      state.joinCode = "";
+      setMessage("上一局房间已过期，请重新创建房间或加入新的邀请链接。");
+      render();
+      return;
+    }
     setMessage(error.message, true);
     render();
   }
@@ -486,7 +493,7 @@ function stopPolling() {
   }
 }
 
-function resetLocal() {
+function clearRoomSession() {
   stopPolling();
   storage.removeItem("werewolfRoomCode");
   storage.removeItem("werewolfHostToken");
@@ -497,10 +504,14 @@ function resetLocal() {
   state.hostToken = "";
   state.playerToken = "";
   state.joinSecret = "";
+  state.roleVisible = false;
+}
+
+function resetLocal() {
+  clearRoomSession();
   state.joinCode = "";
   state.message = "";
   state.error = "";
-  state.roleVisible = false;
   render();
 }
 
@@ -546,10 +557,14 @@ function handleInput(event) {
 
 async function boot() {
   const params = new URLSearchParams(window.location.search);
-  const roomFromUrl = params.get("room");
+  const roomFromUrl = (params.get("room") || "").replace(/\D/g, "").slice(0, 6);
   const inviteFromUrl = params.get("invite");
   if (roomFromUrl) {
-    state.joinCode = roomFromUrl.replace(/\D/g, "").slice(0, 6);
+    if (state.roomCode && state.roomCode !== roomFromUrl) {
+      clearRoomSession();
+      setMessage("已切换到新的房间链接，请输入昵称加入。");
+    }
+    state.joinCode = roomFromUrl;
   }
   if (inviteFromUrl) {
     state.joinSecret = inviteFromUrl.replace(/[^A-Za-z0-9]/g, "").slice(0, 32);
