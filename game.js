@@ -288,9 +288,9 @@ function renderRoleConfigEditor() {
   `;
 }
 
-function renderPlayerOptions(players, includeEmpty = false, selectedValue = "") {
+function renderPlayerOptions(players, includeEmpty = false, selectedValue = "", emptyLabel = "不使用") {
   const emptySelected = selectedValue === "" ? " selected" : "";
-  return `${includeEmpty ? `<option value=""${emptySelected}>不使用</option>` : ""}${players
+  return `${includeEmpty ? `<option value=""${emptySelected}>${escapeHtml(emptyLabel)}</option>` : ""}${players
     .filter((player) => player.alive)
     .map((player) => {
       const selected = String(player.id) === String(selectedValue) ? " selected" : "";
@@ -586,7 +586,15 @@ function renderGameControls(room) {
       <div class="result-hero">
         <span class="camp-tag ${room.winner === "werewolf" ? "werewolf" : "good"}">${room.winner === "werewolf" ? "狼人阵营胜利" : "好人阵营胜利"}</span>
         <h2>游戏结束</h2>
-        <p>所有身份已公开，房主可以重新创建下一局。</p>
+        <p>所有身份已公开，房主可以在本房间直接开启下一局。</p>
+        ${
+          room.isHost
+            ? `<div class="actions">
+                <button class="primary-button" type="button" data-start-room ${room.canStart ? "" : "disabled"}>再开一局并重新分配身份</button>
+                <button class="danger-button" type="button" data-disband-room>解散房间</button>
+              </div>`
+            : `<div class="actions"><button class="secondary-button" type="button" disabled>等待房主再开一局</button></div>`
+        }
       </div>
     `;
   }
@@ -634,12 +642,25 @@ function renderPlayerPanel(room) {
             ? `<p class="notice">狼人队友：${viewer.teammates.map((item) => `${item.seat}号 ${escapeHtml(item.name)}`).join("、")}</p>`
             : ""
         }
+        ${renderSeerChecks(viewer)}
       </div>
       <div class="actions">
         <button class="primary-button" type="button" data-toggle-role>${state.roleVisible ? "隐藏身份" : "查看我的身份"}</button>
       </div>
     </div>
     ${renderPhaseAction(room, viewer)}
+  `;
+}
+
+function renderSeerChecks(viewer) {
+  if (viewer.role !== "seer" || !viewer.checks?.length) return "";
+  return `
+    <div class="section-title"><h3>我的查验结果</h3></div>
+    <ul class="records">
+      ${viewer.checks
+        .map((item) => `<li class="record-item"><span>第${item.round}夜：${item.seat}号 ${escapeHtml(item.name)} 是 ${item.result}</span></li>`)
+        .join("")}
+    </ul>
   `;
 }
 
@@ -670,7 +691,6 @@ function renderNightAction(room, viewer) {
       <div class="section-title"><h3>预言家查验</h3></div>
       <label class="action-select">查验目标<select data-action-target data-selection-key="${targetKey}">${options}</select></label>
       <div class="actions"><button class="primary-button" type="button" data-night-action="seer">确认查验</button></div>
-      ${viewer.checks?.length ? `<ul class="records">${viewer.checks.map((item) => `<li class="record-item"><span>第${item.round}夜：${item.seat}号 ${escapeHtml(item.name)} 是 ${item.result}</span></li>`).join("")}</ul>` : ""}
     `);
   }
   if (viewer.role === "witch") {
@@ -680,8 +700,9 @@ function renderNightAction(room, viewer) {
     return panel(`
       <div class="section-title"><h3>女巫行动</h3></div>
       <div class="notice">${killed ? `今晚被杀：${killed.seat}号 ${escapeHtml(killed.name)}` : "今晚没有狼人击杀目标。"}</div>
-      <label><input type="checkbox" data-witch-heal ${viewer.witch?.healUsed || !killed ? "disabled" : ""} /> 使用解药</label>
+      <label><input type="checkbox" data-witch-heal data-locked="${viewer.witch?.healUsed || !killed ? "true" : "false"}" ${viewer.witch?.healUsed || !killed || selectedPoison ? "disabled" : ""} /> 使用解药</label>
       <label class="action-select">毒药目标<select data-witch-poison data-selection-key="${poisonKey}" ${viewer.witch?.poisonUsed ? "disabled" : ""}>${renderPlayerOptions(room.players, true, selectedPoison)}</select></label>
+      <p class="subtle">女巫同一晚只能使用一瓶药。</p>
       <div class="actions"><button class="primary-button" type="button" data-night-action="witch">确认女巫行动</button></div>
     `);
   }
@@ -767,7 +788,7 @@ function renderVoteAction(room, viewer) {
   return panel(`
     <div class="section-title"><h3>白天投票</h3></div>
     <div class="notice">${escapeHtml(room.announcement || "请发言后投票放逐一名玩家。")}</div>
-    <label class="action-select">放逐目标<select data-action-target data-selection-key="${voteKey}">${renderPlayerOptions(room.players, false, selectedVote)}</select></label>
+    <label class="action-select">放逐目标<select data-action-target data-selection-key="${voteKey}">${renderPlayerOptions(room.players, true, selectedVote, "弃票")}</select></label>
     <div class="actions"><button class="danger-button" type="button" data-day-vote>确认投票</button></div>
   `);
 }
@@ -1270,10 +1291,14 @@ function selectedValue(selector) {
 
 function submitNightAction(action) {
   if (action === "witch") {
-    submitPlayerAction("witch", {
-      heal: Boolean(app.querySelector("[data-witch-heal]")?.checked),
-      poisonTargetId: selectedValue("[data-witch-poison]"),
-    });
+    const heal = Boolean(app.querySelector("[data-witch-heal]")?.checked);
+    const poisonTargetId = selectedValue("[data-witch-poison]");
+    if (heal && poisonTargetId) {
+      setMessage("女巫同一晚不能同时使用解药和毒药。", true);
+      render();
+      return;
+    }
+    submitPlayerAction("witch", { heal, poisonTargetId });
     return;
   }
   submitPlayerAction(action, { targetId: selectedValue("[data-action-target]") });
@@ -1363,6 +1388,26 @@ function resetLocal() {
   state.joinCode = "";
   state.message = "";
   state.error = "";
+  render();
+}
+
+async function leaveRoom() {
+  const isHostLeaving = Boolean(state.hostToken && state.roomCode);
+  if (state.hostToken && state.roomCode) {
+    if (!window.confirm("房主离开会自动解散房间，确定离开吗？")) return;
+    try {
+      await api(`/api/rooms/${encodeURIComponent(state.roomCode)}/disband`, {
+        method: "POST",
+        body: JSON.stringify({ hostToken: state.hostToken }),
+      });
+    } catch (error) {
+      setMessage(error.message, true);
+      render();
+      return;
+    }
+  }
+  resetLocal();
+  setMessage(isHostLeaving ? "房间已解散。" : "已离开房间。");
   render();
 }
 
@@ -1510,6 +1555,20 @@ function handleChange(event) {
   if (event.target.dataset.selectionKey !== undefined) {
     state.actionSelections[event.target.dataset.selectionKey] = event.target.value;
   }
+  if (event.target.dataset.witchPoison !== undefined) {
+    const heal = app.querySelector("[data-witch-heal]");
+    if (heal) {
+      heal.checked = false;
+      heal.disabled = Boolean(event.target.value) || heal.dataset.locked === "true";
+    }
+  }
+  if (event.target.dataset.witchHeal !== undefined && event.target.checked) {
+    const poison = app.querySelector("[data-witch-poison]");
+    if (poison) {
+      poison.value = "";
+      if (poison.dataset.selectionKey) state.actionSelections[poison.dataset.selectionKey] = "";
+    }
+  }
 }
 
 async function boot() {
@@ -1545,6 +1604,6 @@ app.addEventListener("focusin", (event) => {
 app.addEventListener("focusout", (event) => {
   if (isEditingControl(event.target)) window.setTimeout(finishTyping, 120);
 });
-resetButton.addEventListener("click", resetLocal);
+resetButton.addEventListener("click", leaveRoom);
 
 boot();

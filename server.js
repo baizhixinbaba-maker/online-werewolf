@@ -301,7 +301,7 @@ function nightActionDone(room, viewer) {
 }
 
 function dayVoteDone(room, viewer) {
-  return Boolean(viewer && room.phase === "day" && room.day?.votes?.[viewer.id]);
+  return Boolean(viewer && room.phase === "day" && Object.prototype.hasOwnProperty.call(room.day?.votes || {}, viewer.id));
 }
 
 function publicRoom(room, viewerToken, viewerJoinSecret) {
@@ -318,7 +318,7 @@ function publicRoom(room, viewerToken, viewerJoinSecret) {
     phase: room.phase,
     round: room.round,
     announcement: room.announcement,
-    canStart: room.players.length === room.playerCount && room.status === "lobby",
+    canStart: room.players.length === room.playerCount && ["lobby", "ended"].includes(room.status),
     joinedCount: room.players.length,
     config: room.config,
     settings: {
@@ -655,6 +655,24 @@ function finishRoom(room, winner, message) {
   room.winner = winner;
   room.announcement = message;
   room.log.push(message);
+}
+
+function resetRoomForGame(room) {
+  room.round = 0;
+  room.startedAt = Date.now();
+  room.winner = null;
+  room.announcement = "";
+  room.night = null;
+  room.day = null;
+  room.discussion = null;
+  room.lastWords = null;
+  room.pendingDeaths = [];
+  room.pendingTransition = null;
+  room.speechLog = [];
+  room.hunter = null;
+  room.pendingAfterHunter = null;
+  room.witch = { healUsed: false, poisonUsed: false };
+  room.guardLastTargetId = null;
 }
 
 function makeNight(round) {
@@ -1131,7 +1149,7 @@ function startRoom(room, hostToken) {
     error.status = 403;
     throw error;
   }
-  if (room.status !== "lobby") {
+  if (!["lobby", "ended"].includes(room.status)) {
     const error = new Error(text.alreadyStarted);
     error.status = 409;
     throw error;
@@ -1149,17 +1167,12 @@ function startRoom(room, hostToken) {
     role: roles[index],
     alive: true,
     ready: true,
+    checks: [],
     lastWordsUsed: false,
   }));
   room.status = "started";
-  room.startedAt = Date.now();
   room.log = [text.rolesAssigned];
-  room.pendingDeaths = [];
-  room.pendingTransition = null;
-  room.discussion = null;
-  room.lastWords = null;
-  room.day = null;
-  room.hunter = null;
+  resetRoomForGame(room);
   startNextNight(room);
 }
 
@@ -1220,6 +1233,11 @@ function witchAction(room, token, body) {
   }
   const wantsHeal = Boolean(body.heal);
   const poisonTargetId = String(body.poisonTargetId || "");
+  if (wantsHeal && poisonTargetId) {
+    const error = new Error("\u5973\u5deb\u540c\u4e00\u665a\u4e0d\u80fd\u540c\u65f6\u4f7f\u7528\u89e3\u836f\u548c\u6bd2\u836f");
+    error.status = 400;
+    throw error;
+  }
   if (wantsHeal) {
     if (room.witch.healUsed) {
       const error = new Error("\u89e3\u836f\u5df2\u7ecf\u7528\u8fc7");
@@ -1272,17 +1290,19 @@ function guardAction(room, token, targetId) {
 function voteAction(room, token, targetId) {
   requirePhase(room, "day");
   const viewer = requireLivingViewer(room, token);
-  const target = validateAliveTarget(room, targetId);
-  room.day.votes[viewer.id] = target.id;
+  const cleanTargetId = String(targetId || "");
+  const target = cleanTargetId ? validateAliveTarget(room, cleanTargetId) : null;
+  room.day.votes[viewer.id] = target ? target.id : "";
   if (Object.keys(room.day.votes).length < alivePlayers(room).length) return;
 
   const tally = new Map();
   for (const votedId of Object.values(room.day.votes)) {
+    if (!votedId) continue;
     tally.set(votedId, (tally.get(votedId) || 0) + 1);
   }
   const ordered = [...tally.entries()].sort((left, right) => right[1] - left[1]);
   if (!ordered.length || (ordered[1] && ordered[0][1] === ordered[1][1])) {
-    room.log.push("\u767d\u5929\u6295\u7968\u5e73\u7968\uff0c\u65e0\u4eba\u51fa\u5c40");
+    room.log.push(ordered.length ? "\u767d\u5929\u6295\u7968\u5e73\u7968\uff0c\u65e0\u4eba\u51fa\u5c40" : "\u767d\u5929\u6295\u7968\u65e0\u4eba\u5f97\u7968\uff0c\u65e0\u4eba\u51fa\u5c40");
     if (!checkWinner(room)) startNextNight(room);
     return;
   }
