@@ -7,6 +7,14 @@
   },
   "scripts": {
     "dev": "node server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "cap:sync": "cap sync android",
+    "cap:open": "cap open android",
+    "android:build": "cd android && gradlew.bat assembleDebug"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/cli": "^8.4.1",
+    "@capacitor/core": "^8.4.1"
   }
 }

@@ -23,6 +23,33 @@ const fallbackRoleMeta = {
 const roleOrder = ["werewolf", "villager", "seer", "witch", "hunter", "guard"];
 const storage = window.localStorage;
 
+function makeVoiceChannelState(channel) {
+  return {
+    channel,
+    enabled: false,
+    muted: false,
+    status: "",
+    error: "",
+    needsPlayback: false,
+    participants: [],
+    syncTimer: null,
+    lastSignalId: 0,
+    iceServers: [],
+    playerId: "",
+    localStream: null,
+    peers: new Map(),
+  };
+}
+
+function voiceState(channel = "public") {
+  if (!state.voiceChannels[channel]) state.voiceChannels[channel] = makeVoiceChannelState(channel);
+  return state.voiceChannels[channel];
+}
+
+function activeVoiceChannel() {
+  return Object.values(state.voiceChannels).find((voice) => voice.enabled) || null;
+}
+
 let state = {
   screen: "home",
   configs: fallbackConfigs,
@@ -48,18 +75,10 @@ let state = {
   pollTimer: null,
   clockTimer: null,
   now: Date.now(),
-  voiceEnabled: false,
-  voiceMuted: false,
-  voiceStatus: "",
-  voiceError: "",
-  voiceNeedsPlayback: false,
-  voiceParticipants: [],
-  voiceSyncTimer: null,
-  voiceLastSignalId: 0,
-  voiceIceServers: [],
-  voicePlayerId: "",
-  localStream: null,
-  peers: new Map(),
+  voiceChannels: {
+    public: makeVoiceChannelState("public"),
+    werewolf: makeVoiceChannelState("werewolf"),
+  },
   isTyping: false,
   pendingRoom: null,
   actionSelections: {},
@@ -288,13 +307,16 @@ function renderRoleConfigEditor() {
   `;
 }
 
-function renderPlayerOptions(players, includeEmpty = false, selectedValue = "", emptyLabel = "不使用") {
+function renderPlayerOptions(players, includeEmpty = false, selectedValue = "", emptyLabel = "不使用", disabledIds = []) {
   const emptySelected = selectedValue === "" ? " selected" : "";
+  const disabledSet = new Set(disabledIds.map(String));
   return `${includeEmpty ? `<option value=""${emptySelected}>${escapeHtml(emptyLabel)}</option>` : ""}${players
     .filter((player) => player.alive)
     .map((player) => {
       const selected = String(player.id) === String(selectedValue) ? " selected" : "";
-      return `<option value="${escapeHtml(player.id)}"${selected}>${player.seat}号 ${escapeHtml(player.name)}</option>`;
+      const disabled = disabledSet.has(String(player.id)) ? " disabled" : "";
+      const suffix = disabled ? "（上晚已守护）" : "";
+      return `<option value="${escapeHtml(player.id)}"${selected}${disabled}>${player.seat}号 ${escapeHtml(player.name)}${suffix}</option>`;
     })
     .join("")}`;
 }
@@ -477,32 +499,43 @@ function renderRoomBadge(room) {
   `;
 }
 
-function renderVoicePanel(room) {
+function canUseVoiceChannel(room, channel) {
+  if (!state.playerToken || !room.viewer) return false;
+  if (channel === "werewolf") return room.status === "started" && room.phase === "night" && room.viewer.alive && room.viewer.role === "werewolf";
+  return !(room.status === "started" && room.phase === "night");
+}
+
+function renderVoicePanel(room, channel = "public") {
   if (!state.playerToken || !room.viewer) return "";
-  const participants = state.voiceEnabled ? state.voiceParticipants : room.voiceParticipants || [];
-  const status = state.voiceError || state.voiceStatus || (state.voiceEnabled ? "语音已开启" : "语音未开启");
+  const voice = voiceState(channel);
+  const isWerewolfVoice = channel === "werewolf";
+  const allowed = canUseVoiceChannel(room, channel);
+  const participants = voice.enabled ? voice.participants : isWerewolfVoice ? room.werewolfVoiceParticipants || [] : room.voiceParticipants || [];
+  const title = isWerewolfVoice ? "狼人夜聊" : "房间语音";
+  const blockedStatus = isWerewolfVoice ? "只有夜晚存活狼人可以使用" : "夜晚公共语音关闭，等待狼人夜聊";
+  const status = voice.error || voice.status || (allowed ? (voice.enabled ? "语音已开启" : "语音未开启") : blockedStatus);
   return `
-    <div class="voice-box ${state.voiceEnabled ? "active" : ""}">
+    <div class="voice-box ${voice.enabled ? "active" : ""} ${isWerewolfVoice ? "werewolf-voice" : ""}" data-voice-channel="${channel}">
       <div class="section-title">
-        <h3>房间语音</h3>
-        <span class="status-tag ${state.voiceEnabled ? "alive" : "dead"}">${participants.length} 人在线</span>
+        <h3>${title}</h3>
+        <span class="status-tag ${voice.enabled ? "alive" : "dead"}">${participants.length} 人在线</span>
       </div>
       <div class="voice-list">
         ${
           participants.length
-            ? participants.map((item) => `<span class="voice-chip ${item.id === state.voicePlayerId ? "self" : ""}">${item.seat}号 ${escapeHtml(item.name)}</span>`).join("")
+            ? participants.map((item) => `<span class="voice-chip ${item.id === voice.playerId ? "self" : ""}">${item.seat}号 ${escapeHtml(item.name)}</span>`).join("")
             : `<span class="subtle">暂无玩家开启语音</span>`
         }
       </div>
       <div class="actions">
         ${
-          state.voiceEnabled
+          voice.enabled
             ? `
-              <button class="secondary-button" type="button" data-voice-mute>${state.voiceMuted ? "取消静音" : "静音"}</button>
-              ${state.voiceNeedsPlayback ? `<button class="primary-button" type="button" data-voice-play>播放声音</button>` : ""}
-              <button class="ghost-button" type="button" data-voice-leave>关闭语音</button>
+              <button class="secondary-button" type="button" data-voice-mute data-voice-channel="${channel}">${voice.muted ? "取消静音" : "静音"}</button>
+              ${voice.needsPlayback ? `<button class="primary-button" type="button" data-voice-play data-voice-channel="${channel}">播放声音</button>` : ""}
+              <button class="ghost-button" type="button" data-voice-leave data-voice-channel="${channel}">关闭语音</button>
             `
-            : `<button class="secondary-button" type="button" data-voice-join>开启语音</button>`
+            : `<button class="secondary-button" type="button" data-voice-join data-voice-channel="${channel}" ${allowed ? "" : "disabled"}>${isWerewolfVoice ? "开启狼人夜聊" : "开启语音"}</button>`
         }
       </div>
       <p class="subtle voice-status">${escapeHtml(status)}</p>
@@ -565,6 +598,7 @@ function renderRoom() {
             : renderGameControls(room)
         }
         ${renderVoicePanel(room)}
+        ${room.viewer?.role === "werewolf" ? renderVoicePanel(room, "werewolf") : ""}
       `)}
       ${panel(`
         <div class="section-title">
@@ -707,10 +741,25 @@ function renderNightAction(room, viewer) {
     `);
   }
   if (viewer.role === "guard") {
+    const guardLastTargetId = viewer.guard?.lastTargetId || "";
+    const guardOptions = renderPlayerOptions(
+      room.players,
+      true,
+      selectedTarget === guardLastTargetId ? "" : selectedTarget,
+      "放弃守护",
+      guardLastTargetId ? [guardLastTargetId] : [],
+    );
+    const lastTargetNotice = viewer.guard?.lastTarget
+      ? `<p class="subtle">上一晚守护：${viewer.guard.lastTarget.seat}号 ${escapeHtml(viewer.guard.lastTarget.name)}，本晚不能连续守护同一名玩家。</p>`
+      : `<p class="subtle">可选择一名玩家守护，也可以本晚放弃守护。</p>`;
     return panel(`
       <div class="section-title"><h3>守卫行动</h3></div>
-      <label class="action-select">守护目标<select data-action-target data-selection-key="${targetKey}">${options}</select></label>
-      <div class="actions"><button class="primary-button" type="button" data-night-action="guard">确认守护</button></div>
+      <label class="action-select">守护目标<select data-action-target data-selection-key="${targetKey}">${guardOptions}</select></label>
+      ${lastTargetNotice}
+      <div class="actions">
+        <button class="primary-button" type="button" data-night-action="guard">确认守护</button>
+        <button class="ghost-button" type="button" data-night-action="guard" data-guard-pass>放弃守护</button>
+      </div>
     `);
   }
   return `<div class="notice">夜晚阶段，你没有夜晚技能，等待天亮。</div>`;
@@ -797,145 +846,158 @@ async function voiceApi(path, options = {}) {
   return api(`/api/rooms/${encodeURIComponent(state.roomCode)}/voice/${path}`, options);
 }
 
-async function joinVoice() {
+async function joinVoice(channel = "public") {
   if (!state.playerToken) {
     setMessage("请先加入房间再开启语音。", true);
     render();
     return;
   }
+  const voice = voiceState(channel);
   try {
-    state.voiceError = "";
-    state.voiceStatus = "正在请求麦克风权限...";
+    const otherVoice = activeVoiceChannel();
+    if (otherVoice && otherVoice.channel !== channel) stopVoice(otherVoice.channel);
+    voice.error = "";
+    voice.status = "正在请求麦克风权限...";
     render();
-    state.localStream = await navigator.mediaDevices.getUserMedia({
+    voice.localStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       video: false,
     });
     const data = await voiceApi("join", {
       method: "POST",
-      body: JSON.stringify({ playerToken: state.playerToken }),
+      body: JSON.stringify({ playerToken: state.playerToken, channel }),
     });
-    state.voiceEnabled = true;
-    state.voiceMuted = false;
-    state.voiceNeedsPlayback = false;
-    state.voicePlayerId = data.playerId;
-    state.voiceParticipants = data.participants || [];
-    state.voiceIceServers = data.iceServers || [];
-    state.voiceLastSignalId = data.lastSignalId || 0;
-    state.voiceStatus = "语音已开启";
-    startVoiceSync();
-    await connectVoiceParticipants();
+    voice.enabled = true;
+    voice.muted = false;
+    voice.needsPlayback = false;
+    voice.playerId = data.playerId;
+    voice.participants = data.participants || [];
+    voice.iceServers = data.iceServers || [];
+    voice.lastSignalId = data.lastSignalId || 0;
+    voice.status = channel === "werewolf" ? "狼人夜聊已开启" : "语音已开启";
+    startVoiceSync(channel);
+    await connectVoiceParticipants(channel);
     render();
   } catch (error) {
-    state.voiceError = error.message || "开启语音失败";
-    stopLocalVoice();
+    voice.error = error.message || "开启语音失败";
+    stopLocalVoice(channel);
     render();
   }
 }
 
-function stopLocalVoice() {
-  if (state.localStream) {
-    state.localStream.getTracks().forEach((track) => track.stop());
-    state.localStream = null;
+function stopLocalVoice(channel = "public") {
+  const voice = voiceState(channel);
+  if (voice.localStream) {
+    voice.localStream.getTracks().forEach((track) => track.stop());
+    voice.localStream = null;
   }
 }
 
-function startVoiceSync() {
-  stopVoiceSync();
-  state.voiceSyncTimer = window.setInterval(syncVoice, 1200);
+function startVoiceSync(channel = "public") {
+  const voice = voiceState(channel);
+  stopVoiceSync(channel);
+  voice.syncTimer = window.setInterval(() => syncVoice(channel), 1200);
 }
 
-function stopVoiceSync() {
-  if (state.voiceSyncTimer) {
-    window.clearInterval(state.voiceSyncTimer);
-    state.voiceSyncTimer = null;
+function stopVoiceSync(channel = "public") {
+  const voice = voiceState(channel);
+  if (voice.syncTimer) {
+    window.clearInterval(voice.syncTimer);
+    voice.syncTimer = null;
   }
 }
 
-async function syncVoice() {
-  if (!state.voiceEnabled) return;
+async function syncVoice(channel = "public") {
+  const voice = voiceState(channel);
+  if (!voice.enabled) return;
   try {
-    const data = await voiceApi(`sync?token=${encodeURIComponent(state.playerToken)}&since=${state.voiceLastSignalId}`);
-    state.voiceParticipants = data.participants || [];
-    state.voiceLastSignalId = data.lastSignalId || state.voiceLastSignalId;
+    const data = await voiceApi(`sync?token=${encodeURIComponent(state.playerToken)}&since=${voice.lastSignalId}&channel=${encodeURIComponent(channel)}`);
+    voice.participants = data.participants || [];
+    voice.lastSignalId = data.lastSignalId || voice.lastSignalId;
     for (const message of data.messages || []) {
-      await handleVoiceSignal(message);
+      await handleVoiceSignal(channel, message);
     }
-    await connectVoiceParticipants();
-    cleanupVoicePeers();
-    updateVoicePanelOnly();
+    await connectVoiceParticipants(channel);
+    cleanupVoicePeers(channel);
+    updateVoicePanelOnly(channel);
   } catch (error) {
-    state.voiceError = error.message || "语音连接中断";
-    updateVoicePanelOnly();
+    voice.error = error.message || "语音连接中断";
+    stopVoice(channel);
+    updateVoicePanelOnly(channel);
   }
 }
 
-async function leaveVoice() {
+async function leaveVoice(channel = "public") {
+  const voice = voiceState(channel);
   try {
-    if (state.voiceEnabled) {
+    if (voice.enabled) {
       await voiceApi("leave", {
         method: "POST",
-        body: JSON.stringify({ playerToken: state.playerToken }),
+        body: JSON.stringify({ playerToken: state.playerToken, channel }),
       });
     }
   } catch (error) {
     // The local microphone and peer connections should still close even if the leave request fails.
   }
-  stopVoice();
+  stopVoice(channel);
   render();
 }
 
-function stopVoice() {
-  stopVoiceSync();
-  for (const peer of state.peers.values()) {
+function stopVoice(channel = "public") {
+  const voice = voiceState(channel);
+  stopVoiceSync(channel);
+  for (const peer of voice.peers.values()) {
     peer.connection.close();
     peer.audio?.remove();
   }
-  state.peers.clear();
-  stopLocalVoice();
-  state.voiceEnabled = false;
-  state.voiceMuted = false;
-  state.voiceNeedsPlayback = false;
-  state.voiceStatus = "";
-  state.voiceError = "";
-  state.voiceParticipants = [];
-  state.voiceLastSignalId = 0;
-  state.voiceIceServers = [];
-  state.voicePlayerId = "";
+  voice.peers.clear();
+  stopLocalVoice(channel);
+  voice.enabled = false;
+  voice.muted = false;
+  voice.needsPlayback = false;
+  voice.status = "";
+  voice.error = "";
+  voice.participants = [];
+  voice.lastSignalId = 0;
+  voice.iceServers = [];
+  voice.playerId = "";
 }
 
-function toggleVoiceMute() {
-  if (!state.localStream) return;
-  state.voiceMuted = !state.voiceMuted;
-  state.localStream.getAudioTracks().forEach((track) => {
-    track.enabled = !state.voiceMuted;
+function toggleVoiceMute(channel = "public") {
+  const voice = voiceState(channel);
+  if (!voice.localStream) return;
+  voice.muted = !voice.muted;
+  voice.localStream.getAudioTracks().forEach((track) => {
+    track.enabled = !voice.muted;
   });
-  state.voiceStatus = state.voiceMuted ? "麦克风已静音" : "麦克风已开启";
+  voice.status = voice.muted ? "麦克风已静音" : "麦克风已开启";
   render();
 }
 
-async function connectVoiceParticipants() {
-  if (!state.voiceEnabled || !state.voicePlayerId || !state.localStream) return;
-  for (const participant of state.voiceParticipants) {
-    if (participant.id === state.voicePlayerId) continue;
-    const peer = ensureVoicePeer(participant.id);
-    if (state.voicePlayerId < participant.id && !peer.offerSent) {
+async function connectVoiceParticipants(channel = "public") {
+  const voice = voiceState(channel);
+  if (!voice.enabled || !voice.playerId || !voice.localStream) return;
+  for (const participant of voice.participants) {
+    if (participant.id === voice.playerId) continue;
+    const peer = ensureVoicePeer(channel, participant.id);
+    if (voice.playerId < participant.id && !peer.offerSent) {
       peer.offerSent = true;
       const offer = await peer.connection.createOffer();
       await peer.connection.setLocalDescription(offer);
-      await sendVoiceSignal(participant.id, "offer", peer.connection.localDescription);
+      await sendVoiceSignal(channel, participant.id, "offer", peer.connection.localDescription);
     }
   }
 }
 
-function ensureVoicePeer(peerId) {
-  const existing = state.peers.get(peerId);
+function ensureVoicePeer(channel, peerId) {
+  const voice = voiceState(channel);
+  const existing = voice.peers.get(peerId);
   if (existing) return existing;
-  const connection = new RTCPeerConnection({ iceServers: state.voiceIceServers });
-  state.localStream.getAudioTracks().forEach((track) => connection.addTrack(track, state.localStream));
+  const connection = new RTCPeerConnection({ iceServers: voice.iceServers });
+  voice.localStream.getAudioTracks().forEach((track) => connection.addTrack(track, voice.localStream));
   const peer = { connection, audio: null, offerSent: false, pendingCandidates: [] };
   connection.onicecandidate = (event) => {
-    if (event.candidate) sendVoiceSignal(peerId, "ice-candidate", event.candidate).catch(() => {});
+    if (event.candidate) sendVoiceSignal(channel, peerId, "ice-candidate", event.candidate).catch(() => {});
   };
   connection.ontrack = (event) => {
     if (!peer.audio) {
@@ -947,49 +1009,50 @@ function ensureVoicePeer(peerId) {
     }
     peer.audio.srcObject = event.streams[0];
     peer.audio.play().then(() => {
-      state.voiceNeedsPlayback = false;
-      state.voiceStatus = "语音已连接";
-      updateVoicePanelOnly();
+      voice.needsPlayback = false;
+      voice.status = "语音已连接";
+      updateVoicePanelOnly(channel);
     }).catch(() => {
-      state.voiceNeedsPlayback = true;
-      state.voiceStatus = "浏览器拦截了声音播放，请点击播放声音";
-      updateVoicePanelOnly();
+      voice.needsPlayback = true;
+      voice.status = "浏览器拦截了声音播放，请点击播放声音";
+      updateVoicePanelOnly(channel);
     });
   };
   connection.onconnectionstatechange = () => {
     if (connection.connectionState === "connected") {
-      state.voiceStatus = "语音已连接";
-      updateVoicePanelOnly();
+      voice.status = "语音已连接";
+      updateVoicePanelOnly(channel);
     }
     if (["checking", "connecting"].includes(connection.connectionState)) {
-      state.voiceStatus = "正在连接语音...";
-      updateVoicePanelOnly();
+      voice.status = "正在连接语音...";
+      updateVoicePanelOnly(channel);
     }
     if (["failed", "closed", "disconnected"].includes(connection.connectionState)) {
-      state.voiceStatus = "语音正在重连...";
-      updateVoicePanelOnly();
+      voice.status = "语音正在重连...";
+      updateVoicePanelOnly(channel);
     }
   };
-  state.peers.set(peerId, peer);
+  voice.peers.set(peerId, peer);
   return peer;
 }
 
-async function sendVoiceSignal(to, type, payload) {
+async function sendVoiceSignal(channel, to, type, payload) {
   await voiceApi("signal", {
     method: "POST",
-    body: JSON.stringify({ playerToken: state.playerToken, to, type, payload }),
+    body: JSON.stringify({ playerToken: state.playerToken, channel, to, type, payload }),
   });
 }
 
-async function handleVoiceSignal(message) {
-  if (!state.voiceEnabled || !message.from) return;
-  const peer = ensureVoicePeer(message.from);
+async function handleVoiceSignal(channel, message) {
+  const voice = voiceState(channel);
+  if (!voice.enabled || !message.from) return;
+  const peer = ensureVoicePeer(channel, message.from);
   if (message.type === "offer") {
     await peer.connection.setRemoteDescription(new RTCSessionDescription(message.payload));
     await flushPendingCandidates(peer);
     const answer = await peer.connection.createAnswer();
     await peer.connection.setLocalDescription(answer);
-    await sendVoiceSignal(message.from, "answer", peer.connection.localDescription);
+    await sendVoiceSignal(channel, message.from, "answer", peer.connection.localDescription);
     return;
   }
   if (message.type === "answer") {
@@ -1019,31 +1082,43 @@ async function flushPendingCandidates(peer) {
   }
 }
 
-function cleanupVoicePeers() {
-  const onlineIds = new Set(state.voiceParticipants.map((participant) => participant.id));
-  for (const [peerId, peer] of state.peers.entries()) {
+function cleanupVoicePeers(channel = "public") {
+  const voice = voiceState(channel);
+  const onlineIds = new Set(voice.participants.map((participant) => participant.id));
+  for (const [peerId, peer] of voice.peers.entries()) {
     if (onlineIds.has(peerId)) continue;
     peer.connection.close();
     peer.audio?.remove();
-    state.peers.delete(peerId);
+    voice.peers.delete(peerId);
   }
 }
 
-function playRemoteVoice() {
-  const plays = [...state.peers.values()]
+function playRemoteVoice(channel = "public") {
+  const voice = voiceState(channel);
+  const plays = [...voice.peers.values()]
     .filter((peer) => peer.audio)
     .map((peer) => peer.audio.play());
   Promise.allSettled(plays).then((results) => {
-    state.voiceNeedsPlayback = results.some((result) => result.status === "rejected");
-    state.voiceStatus = state.voiceNeedsPlayback ? "仍无法播放声音，请检查浏览器声音权限" : "语音已连接";
+    voice.needsPlayback = results.some((result) => result.status === "rejected");
+    voice.status = voice.needsPlayback ? "仍无法播放声音，请检查浏览器声音权限" : "语音已连接";
     render();
   });
 }
 
-function updateVoicePanelOnly() {
-  const box = app.querySelector(".voice-box");
+function updateVoicePanelOnly(channel = "public") {
+  const box = app.querySelector(`[data-voice-channel="${channel}"]`);
   if (!box || !state.room) return;
-  box.outerHTML = renderVoicePanel(state.room);
+  box.outerHTML = renderVoicePanel(state.room, channel);
+}
+
+function enforceVoiceRules(room = state.room) {
+  if (!room) return;
+  if (!canUseVoiceChannel(room, "public") && voiceState("public").enabled) {
+    leaveVoice("public");
+  }
+  if (!canUseVoiceChannel(room, "werewolf") && voiceState("werewolf").enabled) {
+    leaveVoice("werewolf");
+  }
 }
 
 function renderHunterAction(room, viewer) {
@@ -1242,6 +1317,7 @@ async function refreshRoom() {
     state.room = canRenderNow() ? data.room : state.room;
     state.joinSecret = data.room.joinSecret || state.joinSecret;
     if (data.room.status !== "started") state.roleVisible = false;
+    enforceVoiceRules(data.room);
     renderOrDefer(data.room);
   } catch (error) {
     if (error.message.includes("房间不存在")) {
@@ -1263,6 +1339,7 @@ async function startRoom() {
       body: JSON.stringify({ hostToken: state.hostToken }),
     });
     state.room = data.room;
+    enforceVoiceRules(data.room);
     setMessage("游戏开始，身份已随机分配。");
     render();
   } catch (error) {
@@ -1289,7 +1366,7 @@ function selectedValue(selector) {
   return app.querySelector(selector)?.value || "";
 }
 
-function submitNightAction(action) {
+function submitNightAction(action, button) {
   if (action === "witch") {
     const heal = Boolean(app.querySelector("[data-witch-heal]")?.checked);
     const poisonTargetId = selectedValue("[data-witch-poison]");
@@ -1301,7 +1378,8 @@ function submitNightAction(action) {
     submitPlayerAction("witch", { heal, poisonTargetId });
     return;
   }
-  submitPlayerAction(action, { targetId: selectedValue("[data-action-target]") });
+  const targetId = action === "guard" && button?.dataset.guardPass !== undefined ? "" : selectedValue("[data-action-target]");
+  submitPlayerAction(action, { targetId });
 }
 
 function submitVote() {
@@ -1367,7 +1445,8 @@ function stopPolling() {
 function clearRoomSession() {
   stopPolling();
   stopClock();
-  if (state.voiceEnabled) stopVoice();
+  stopVoice("public");
+  stopVoice("werewolf");
   storage.removeItem("werewolfRoomCode");
   storage.removeItem("werewolfHostToken");
   storage.removeItem("werewolfPlayerToken");
@@ -1450,7 +1529,7 @@ function handleClick(event) {
     return;
   }
   if (button.dataset.nightAction) {
-    submitNightAction(button.dataset.nightAction);
+    submitNightAction(button.dataset.nightAction, button);
     return;
   }
   if (button.dataset.dayVote !== undefined) {
@@ -1462,19 +1541,19 @@ function handleClick(event) {
     return;
   }
   if (button.dataset.voiceJoin !== undefined) {
-    joinVoice();
+    joinVoice(button.dataset.voiceChannel || "public");
     return;
   }
   if (button.dataset.voiceMute !== undefined) {
-    toggleVoiceMute();
+    toggleVoiceMute(button.dataset.voiceChannel || "public");
     return;
   }
   if (button.dataset.voicePlay !== undefined) {
-    playRemoteVoice();
+    playRemoteVoice(button.dataset.voiceChannel || "public");
     return;
   }
   if (button.dataset.voiceLeave !== undefined) {
-    leaveVoice();
+    leaveVoice(button.dataset.voiceChannel || "public");
     return;
   }
   if (button.dataset.speechEnd !== undefined) {

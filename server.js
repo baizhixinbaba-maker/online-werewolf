@@ -42,6 +42,8 @@ const types = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
+  ".png": "image/png",
   ".json": "application/json; charset=utf-8",
 };
 
@@ -87,6 +89,11 @@ const allowedStaticFiles = new Map([
   ["/index.html", "index.html"],
   ["/styles.css", "styles.css"],
   ["/game.js", "game.js"],
+  ["/pwa.js", "pwa.js"],
+  ["/service-worker.js", "service-worker.js"],
+  ["/manifest.webmanifest", "manifest.webmanifest"],
+  ["/icons/icon-192.png", path.join("icons", "icon-192.png")],
+  ["/icons/icon-512.png", path.join("icons", "icon-512.png")],
 ]);
 
 function randomToken(length = 18) {
@@ -166,6 +173,13 @@ function makeVoiceState() {
     participants: new Map(),
     messages: [],
     nextMessageId: 1,
+  };
+}
+
+function makeVoiceChannelsState() {
+  return {
+    public: makeVoiceState(),
+    werewolf: makeVoiceState(),
   };
 }
 
@@ -263,7 +277,7 @@ function createRoom(playerCount, hostName, settings = {}) {
       speechTimeLimit: normalizeTimeLimit(settings.speechTimeLimit, defaultSpeechTimeLimit),
       lastWordsTimeLimit: normalizeTimeLimit(settings.lastWordsTimeLimit, defaultLastWordsTimeLimit),
     },
-    voice: makeVoiceState(),
+    voice: makeVoiceChannelsState(),
   };
   room.players.push(createPlayer(room, hostName, hostToken));
   rooms.set(code, room);
@@ -350,6 +364,7 @@ function publicRoom(room, viewerToken, viewerJoinSecret) {
           nightActionDone: nightActionDone(room, viewer),
           dayVoteDone: dayVoteDone(room, viewer),
           witch: viewer.role === "witch" ? witchViewerState(room) : null,
+          guard: viewer.role === "guard" ? guardViewerState(room) : null,
           teammates:
             viewer.role === "werewolf" && room.status !== "lobby"
               ? room.players
@@ -363,6 +378,7 @@ function publicRoom(room, viewerToken, viewerJoinSecret) {
     publicLog: visibleDeaths(room),
     aliveCounts: getAliveCounts(room),
     voiceParticipants: canViewLobby ? getVoiceParticipants(room) : [],
+    werewolfVoiceParticipants: viewer?.role === "werewolf" ? getVoiceParticipants(room, "werewolf") : [],
     serverNow: Date.now(),
     lastWords: canViewLobby ? publicSpeechStage(room, "lastWords") : null,
     discussion: canViewLobby ? publicSpeechStage(room, "discussion") : null,
@@ -477,9 +493,34 @@ function addPlayer(room, name, joinSecret) {
   return player;
 }
 
-function ensureVoiceState(room) {
-  if (!room.voice) room.voice = makeVoiceState();
-  return room.voice;
+function normalizeVoiceChannel(channel) {
+  return channel === "werewolf" ? "werewolf" : "public";
+}
+
+function ensureVoiceState(room, channel = "public") {
+  const normalized = normalizeVoiceChannel(channel);
+  if (!room.voice) room.voice = makeVoiceChannelsState();
+  if (room.voice.participants instanceof Map) {
+    room.voice = { public: room.voice, werewolf: makeVoiceState() };
+  }
+  if (!room.voice.public) room.voice.public = makeVoiceState();
+  if (!room.voice.werewolf) room.voice.werewolf = makeVoiceState();
+  return room.voice[normalized];
+}
+
+function requireVoiceAccess(room, viewer, channel = "public") {
+  const normalized = normalizeVoiceChannel(channel);
+  if (normalized === "public" && room.status === "started" && room.phase === "night") {
+    const error = new Error("\u591c\u665a\u516c\u5171\u8bed\u97f3\u5173\u95ed\uff0c\u53ea\u6709\u5b58\u6d3b\u72fc\u4eba\u53ef\u4ee5\u4f7f\u7528\u72fc\u961f\u8bed\u97f3");
+    error.status = 403;
+    throw error;
+  }
+  if (normalized === "werewolf" && (room.status !== "started" || room.phase !== "night" || !viewer.alive || viewer.role !== "werewolf")) {
+    const error = new Error("\u53ea\u6709\u5b58\u6d3b\u72fc\u4eba\u53ef\u4ee5\u52a0\u5165\u72fc\u961f\u8bed\u97f3");
+    error.status = 403;
+    throw error;
+  }
+  return normalized;
 }
 
 function requireRoomPlayer(room, token) {
@@ -504,11 +545,16 @@ function publicVoiceParticipant(room, participant) {
   };
 }
 
-function pruneVoice(room) {
-  const voice = ensureVoiceState(room);
+function pruneVoice(room, channel = "public") {
+  const voice = ensureVoiceState(room, channel);
   const now = Date.now();
   for (const [playerId, participant] of voice.participants.entries()) {
-    if (!findPlayer(room, playerId) || now - participant.lastSeen > voiceParticipantTimeoutMs) {
+    const player = findPlayer(room, playerId);
+    const normalized = normalizeVoiceChannel(channel);
+    const lostAccess =
+      (normalized === "public" && room.status === "started" && room.phase === "night") ||
+      (normalized === "werewolf" && (!player?.alive || player.role !== "werewolf" || room.status !== "started" || room.phase !== "night"));
+    if (!player || lostAccess || now - participant.lastSeen > voiceParticipantTimeoutMs) {
       voice.participants.delete(playerId);
     }
   }
@@ -517,17 +563,18 @@ function pruneVoice(room) {
     .slice(-voiceMaxMessages);
 }
 
-function getVoiceParticipants(room) {
-  pruneVoice(room);
-  return [...ensureVoiceState(room).participants.values()]
+function getVoiceParticipants(room, channel = "public") {
+  pruneVoice(room, channel);
+  return [...ensureVoiceState(room, channel).participants.values()]
     .map((participant) => publicVoiceParticipant(room, participant))
     .filter(Boolean);
 }
 
-function joinVoice(room, token) {
+function joinVoice(room, token, channel = "public") {
   const viewer = requireRoomPlayer(room, token);
-  const voice = ensureVoiceState(room);
-  pruneVoice(room);
+  const normalized = requireVoiceAccess(room, viewer, channel);
+  const voice = ensureVoiceState(room, normalized);
+  pruneVoice(room, normalized);
   const existing = voice.participants.get(viewer.id);
   const now = Date.now();
   voice.participants.set(viewer.id, {
@@ -537,16 +584,18 @@ function joinVoice(room, token) {
   });
   return {
     playerId: viewer.id,
-    participants: getVoiceParticipants(room),
+    channel: normalized,
+    participants: getVoiceParticipants(room, normalized),
     iceServers: configuredIceServers(),
     lastSignalId: voice.nextMessageId - 1,
   };
 }
 
-function syncVoice(room, token, since) {
+function syncVoice(room, token, since, channel = "public") {
   const viewer = requireRoomPlayer(room, token);
-  const voice = ensureVoiceState(room);
-  pruneVoice(room);
+  const normalized = requireVoiceAccess(room, viewer, channel);
+  const voice = ensureVoiceState(room, normalized);
+  pruneVoice(room, normalized);
   const participant = voice.participants.get(viewer.id);
   if (!participant) {
     const error = new Error("\u8bed\u97f3\u672a\u5f00\u542f\uff0c\u8bf7\u5148\u70b9\u51fb\u5f00\u542f\u8bed\u97f3");
@@ -565,23 +614,26 @@ function syncVoice(room, token, since) {
     }));
   return {
     playerId: viewer.id,
-    participants: getVoiceParticipants(room),
+    channel: normalized,
+    participants: getVoiceParticipants(room, normalized),
     messages,
     lastSignalId: voice.nextMessageId - 1,
   };
 }
 
-function leaveVoice(room, token) {
+function leaveVoice(room, token, channel = "public") {
   const viewer = requireRoomPlayer(room, token);
-  const voice = ensureVoiceState(room);
+  const normalized = normalizeVoiceChannel(channel);
+  const voice = ensureVoiceState(room, normalized);
   voice.participants.delete(viewer.id);
   voice.messages = voice.messages.filter((message) => message.from !== viewer.id && message.to !== viewer.id);
 }
 
-function sendVoiceSignal(room, token, body) {
+function sendVoiceSignal(room, token, body, channel = "public") {
   const viewer = requireRoomPlayer(room, token);
-  const voice = ensureVoiceState(room);
-  pruneVoice(room);
+  const normalized = requireVoiceAccess(room, viewer, channel);
+  const voice = ensureVoiceState(room, normalized);
+  pruneVoice(room, normalized);
   if (!voice.participants.has(viewer.id)) {
     const error = new Error("\u8bed\u97f3\u672a\u5f00\u542f\uff0c\u8bf7\u5148\u70b9\u51fb\u5f00\u542f\u8bed\u97f3");
     error.status = 409;
@@ -1092,6 +1144,14 @@ function witchViewerState(room) {
   };
 }
 
+function guardViewerState(room) {
+  const lastTarget = room.guardLastTargetId ? findPlayer(room, room.guardLastTargetId) : null;
+  return {
+    lastTargetId: lastTarget?.id || "",
+    lastTarget: lastTarget ? { id: lastTarget.id, seat: lastTarget.seat, name: lastTarget.name } : null,
+  };
+}
+
 function allNightDone(room) {
   const livingRoles = new Set(alivePlayers(room).map((player) => player.role));
   if (livingRoles.has("werewolf") && !room.night.wolfTargetId) return false;
@@ -1275,15 +1335,21 @@ function guardAction(room, token, targetId) {
     error.status = 409;
     throw error;
   }
-  const target = validateAliveTarget(room, targetId);
-  if (room.guardLastTargetId === target.id) {
-    const error = new Error("\u5b88\u536b\u4e0d\u80fd\u8fde\u7eed\u4e24\u665a\u5b88\u62a4\u540c\u4e00\u4eba");
-    error.status = 400;
-    throw error;
+  const cleanTargetId = String(targetId || "");
+  if (cleanTargetId) {
+    const target = validateAliveTarget(room, cleanTargetId);
+    if (room.guardLastTargetId === target.id) {
+      const error = new Error("\u5b88\u536b\u4e0d\u80fd\u8fde\u7eed\u4e24\u665a\u5b88\u62a4\u540c\u4e00\u540d\u73a9\u5bb6");
+      error.status = 400;
+      throw error;
+    }
+    room.night.guardTargetId = target.id;
+    room.guardLastTargetId = target.id;
+  } else {
+    room.night.guardTargetId = null;
+    room.guardLastTargetId = null;
   }
-  room.night.guardTargetId = target.id;
   room.night.guardDone = true;
-  room.guardLastTargetId = target.id;
   if (allNightDone(room)) resolveNight(room);
 }
 
@@ -1427,27 +1493,28 @@ async function handleApi(request, response, url) {
 
     if (request.method === "POST" && action === "voice/join") {
       const body = await readBody(request);
-      sendJson(response, 200, joinVoice(room, body.playerToken));
+      sendJson(response, 200, joinVoice(room, body.playerToken, body.channel));
       return;
     }
 
     if (request.method === "GET" && action === "voice/sync") {
       const token = url.searchParams.get("token");
       const since = url.searchParams.get("since");
-      sendJson(response, 200, syncVoice(room, token, since));
+      const channel = url.searchParams.get("channel");
+      sendJson(response, 200, syncVoice(room, token, since, channel));
       return;
     }
 
     if (request.method === "POST" && action === "voice/signal") {
       const body = await readBody(request);
-      sendVoiceSignal(room, body.playerToken, body);
+      sendVoiceSignal(room, body.playerToken, body, body.channel);
       sendJson(response, 200, { ok: true });
       return;
     }
 
     if (request.method === "POST" && action === "voice/leave") {
       const body = await readBody(request);
-      leaveVoice(room, body.playerToken);
+      leaveVoice(room, body.playerToken, body.channel);
       sendJson(response, 200, { ok: true });
       return;
     }

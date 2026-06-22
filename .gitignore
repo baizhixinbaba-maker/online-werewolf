@@ -7,3 +7,4 @@ serveo-*.txt
 pinggy-*.txt
 *.log
 node_modules/
+tools/

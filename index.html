@@ -3,7 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#2f2b28" />
+    <meta name="description" content="多人异地联机的网页版狼人杀游戏。" />
     <title>联机狼人杀</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="icons/icon-192.png" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -13,12 +18,16 @@
           <p class="eyebrow">Werewolf Night</p>
           <h1>联机狼人杀</h1>
         </div>
-        <button id="resetGame" class="ghost-button" type="button">离开房间</button>
+        <div class="header-actions">
+          <button class="ghost-button install-button" type="button" data-install-app hidden>安装应用</button>
+          <button id="resetGame" class="ghost-button" type="button">离开房间</button>
+        </div>
       </header>
 
       <section id="app" class="screen" aria-live="polite"></section>
     </main>
 
     <script src="game.js"></script>
+    <script src="pwa.js"></script>
   </body>
 </html>

@@ -1,0 +1,13 @@
+{
+  "appId": "com.onlinewerewolf.app",
+  "appName": "联机狼人杀",
+  "webDir": "app-shell",
+  "server": {
+    "url": "https://online-werewolf.onrender.com",
+    "cleartext": false
+  },
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": true
+  }
+}

@@ -120,6 +120,12 @@ textarea {
   margin-bottom: 18px;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .app-header h1,
 .app-header p {
   margin: 0;
@@ -229,6 +235,15 @@ textarea {
 
 .voice-box.active {
   border-left: 5px solid var(--ok);
+}
+
+.voice-box.werewolf-voice {
+  border-color: rgba(158, 47, 53, 0.28);
+  background: #fff4f1;
+}
+
+.voice-box.werewolf-voice.active {
+  border-left-color: var(--wolf);
 }
 
 .voice-list {
@@ -391,6 +406,11 @@ textarea {
   border: 1px solid rgba(36, 32, 29, 0.18);
   background: rgba(255, 253, 248, 0.76);
   color: var(--ink);
+}
+
+.install-button {
+  border-color: rgba(47, 116, 95, 0.36);
+  color: var(--ok);
 }
 
 .danger-button {
@@ -737,6 +757,11 @@ textarea {
     flex-direction: column;
   }
 
+  .header-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
   .split {
     grid-template-columns: 1fr;
   }
@@ -772,6 +797,11 @@ textarea {
   }
 
   .actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .header-actions {
     display: grid;
     grid-template-columns: 1fr;
   }
